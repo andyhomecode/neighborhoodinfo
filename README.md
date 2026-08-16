@@ -138,7 +138,7 @@ Covers politics, housing, jobs, density, demographics (age/race), schools, walka
 
 `/neighborhood/hazards`, `/schools`, and `/walkability` are new too — FEMA National Risk Index (natural hazard risk, tract level), NCES school characteristics (enrollment/staffing/poverty-proxy, explicitly not quality ratings — no free nationwide school-rating data exists), and EPA's Smart Location Database (walkability score, residential/employment density, transit access, block-group level). All three fully loaded (85,154 tracts, 99,259 schools, 220,740 block groups). A few real bugs came up building these, all documented in `CLAUDE.md`'s "New data categories": EPA's own source CSV has its GEOID columns corrupted into scientific notation (worked around by reconstructing the GEOID from separate FIPS component columns instead), `geopandas.to_postgis()`'s Postgres `COPY`-based insert doesn't tolerate a float going into an integer column the way a normal `INSERT` would, and FEMA's own inland-flooding hazard code turned out to be `IFLD`, not the initially-guessed `RFLD` — caught because the loader checks the real file's columns against its mapping and reports mismatches instead of assuming.
 
-Publicly reachable at `https://server.maxwell.nyc/neighborhoodapi/...` via an existing homelab Caddy reverse proxy (Cloudflare → Caddy → `localhost:8000`), not a dedicated tunnel container in this repo — see `CLAUDE.md`'s "Public exposure" for the routing config and a real gotcha hit while setting it up (a Docker bind-mount-inode quirk that made a `Caddyfile` edit silently not take effect until the container was restarted).
+Publicly reachable at `https://<your-domain>/neighborhoodapi/...` via an existing homelab Caddy reverse proxy (Cloudflare → Caddy → `localhost:8000`), not a dedicated tunnel container in this repo — see `CLAUDE.md`'s "Public exposure" for the routing config and a real gotcha hit while setting it up (a Docker bind-mount-inode quirk that made a `Caddyfile` edit silently not take effect until the container was restarted).
 
 `test_public_api.py <lat> <lon> [--path ...] [--utterance "..."] [--home-zip ...] [--no-commentary]` smoke-tests the real public URL end to end (Cloudflare → Caddy → the container) — stdlib only, no venv needed, reads `API_KEY` straight from `.env`. Different from `test_lookup.py` above, which only exercises `db/queries.py` directly against the local database, not the HTTP layer at all.
 
@@ -146,14 +146,14 @@ Publicly reachable at `https://server.maxwell.nyc/neighborhoodapi/...` via an ex
 
 Working end to end on iPhone — a single shortcut (named "GIS") handles every category and utterance, and loops for follow-up questions without re-invoking Siri each time:
 
-<img src="Shortcut1.PNG" width="300" alt="Shortcut steps: Get current location, Ask for Text input, an If checking whether the answer is No/End/Quit/Stop, Stop this shortcut"> <img src="Shortcut2.PNG" width="300" alt="Otherwise branch: URL Encode the answer, build the request URL, Get contents of URL, Get Value for summary"> <img src="Shortcut3.PNG" width="300" alt="Continued: Speak the summary, Run GIS (itself) to loop, End If">
+<img src="Shortcut1.PNG" width="300" alt="Shortcut steps: Get current location, Ask for Text input, an If checking whether the answer is No/End/Quit/Stop, Stop this shortcut"> <img src="Shortcut2.png" width="300" alt="Otherwise branch: URL Encode the answer, build the request URL (domain redacted), Get contents of URL, Get Value for summary"> <img src="Shortcut3.PNG" width="300" alt="Continued: Speak the summary, Run GIS (itself) to loop, End If">
 
 1. **Get Current Location**
 2. **Ask for Input** (Text), prompt: *"What do you want to know?"* — when triggered via Siri, this prompts and listens by voice automatically.
 3. **If Any are true**: the answer is `"No"`, `"End"`, `"Quit"`, or `"Stop"` → **Stop This Shortcut**. This is the exit condition for the loop below.
 4. **Otherwise**:
    1. **URL Encode** the answer from step 2 — necessary because a raw, unencoded utterance (e.g. a space in "compare to state") breaks the query string. Built as its own action rather than relying on auto-encoding, since typing the URL directly into a **Text** action (as this shortcut does, to see the full URL for debugging) does *not* auto-encode inserted variables the way inserting them straight into a `URL` action's query fields would.
-   2. **Text**, building the request URL: `https://server.maxwell.nyc/neighborhoodapi/neighborhood?lat=[Latitude]&lon=[Longitude]&utterance=[URL Encoded Text]`
+   2. **Text**, building the request URL: `https://<your-domain>/neighborhoodapi/neighborhood?lat=[Latitude]&lon=[Longitude]&utterance=[URL Encoded Text]`
    3. **Get Contents of URL**, with the `X-API-Key` header set (not visible in these screenshots — configured under the action's "Show More").
    4. **Get Value** for `summary` in the response.
    5. **Speak** the summary.
@@ -167,7 +167,7 @@ Invocation: "Hey Siri, GIS" → Siri asks "What do you want to know?" → say an
 - **`db/`** — schema (`models.py`), loader (`load.py`), and query library (`queries.py`) shared between the loader and the API. Built and tested.
 - **`api/`** — FastAPI, containerized, DeepSeek-powered commentary. Built and tested, including real requests through Docker (not just local `uvicorn`).
 - **Ingestion scripts** (`ingestion/`) — plain Python (venv, not containerized) run manually against Postgres to (re)load nationwide data, roughly yearly.
-- **Docker Compose** — `postgis` and `api` both run via `docker compose up -d --build`. Public HTTPS exposure doesn't live in this compose stack — it reuses an existing homelab Caddy reverse proxy instead (`https://server.maxwell.nyc/neighborhoodapi/...`, see `CLAUDE.md`'s "Public exposure").
+- **Docker Compose** — `postgis` and `api` both run via `docker compose up -d --build`. Public HTTPS exposure doesn't live in this compose stack — it reuses an existing homelab Caddy reverse proxy instead (`https://<your-domain>/neighborhoodapi/...`, see `CLAUDE.md`'s "Public exposure").
 
 Full details, data model, and open design decisions live in [`CLAUDE.md`](./CLAUDE.md).
 
