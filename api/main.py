@@ -15,6 +15,8 @@ from api.llm import CATEGORY_INFO, classify_intent, generate_commentary, help_te
 from api.wikipedia import get_history_events, get_history_people, get_history_summary
 from db.queries import (
     compare_to_home,
+    compare_to_national,
+    compare_to_state,
     get_built_environment,
     get_crime,
     get_crime_rate,
@@ -44,8 +46,8 @@ def _location_or_404(lat: float, lon: float) -> dict:
     return loc
 
 
-def _respond(data: dict, commentary: bool) -> dict:
-    return {"summary": generate_commentary(data) if commentary else None, "data": data}
+def _respond(data: dict, commentary: bool, style: str = "normal") -> dict:
+    return {"summary": generate_commentary(data, style=style) if commentary else None, "data": data}
 
 
 # One data-builder per category `classify_intent` (api/llm.py) can return --
@@ -71,7 +73,17 @@ CATEGORY_BUILDERS = {
     "hazards": lambda loc, lat, lon, home_zip: {"hazards": get_hazard_risk(loc["tract_geoid"])},
     "schools": lambda loc, lat, lon, home_zip: {"schools": get_nearby_schools(lat, lon)},
     "walkability": lambda loc, lat, lon, home_zip: {"built_environment": get_built_environment(loc["block_group_geoid"])},
+    "compare_state": lambda loc, lat, lon, home_zip: {"compare_state": compare_to_state(lat, lon)},
+    "compare_usa": lambda loc, lat, lon, home_zip: {"compare_usa": compare_to_national(lat, lon)},
+    # Explicitly NYC regardless of `home_zip` -- "compare to NYC" means NYC,
+    # not whatever the caller's configured default home is. `compare` (the
+    # existing category) is the one that respects `home_zip`.
+    "compare_nyc": lambda loc, lat, lon, home_zip: {"compare_nyc": compare_to_home(lat, lon, "10002")},
 }
+
+# Categories whose commentary should use the rapid-fire stat-callout style
+# (see api/llm.py's RAPID_FIRE_SYSTEM_PROMPT) instead of narrated prose.
+RAPID_FIRE_CATEGORIES = {"compare_state", "compare_usa", "compare_nyc"}
 
 
 @app.get("/neighborhood", dependencies=[Depends(require_api_key)])
@@ -113,7 +125,14 @@ def neighborhood(
             for category in categories:
                 data.update(CATEGORY_BUILDERS[category](loc, lat, lon, home_zip))
 
-        summary = generate_commentary(data, long=is_everything) if commentary else None
+        if is_everything:
+            style = "long"
+        elif RAPID_FIRE_CATEGORIES & set(categories):
+            style = "rapid_fire"
+        else:
+            style = "normal"
+
+        summary = generate_commentary(data, style=style) if commentary else None
         return {"summary": summary, "data": data}
 
     summary = get_neighborhood_summary(lat, lon)
@@ -213,11 +232,28 @@ def compare(
     lon: float = Query(...),
     home_zip: str = Query("10002"),
     commentary: bool = Query(True),
+    rapid_fire: bool = Query(False, description="Use the short stat-callout style instead of narrated prose."),
 ):
     data = compare_to_home(lat, lon, home_zip)
     if data is None:
         raise HTTPException(status_code=404, detail="location or home ZIP not covered")
-    return _respond(data, commentary)
+    return _respond(data, commentary, style="rapid_fire" if rapid_fire else "normal")
+
+
+@app.get("/neighborhood/compare/state", dependencies=[Depends(require_api_key)])
+def compare_state(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
+    data = compare_to_state(lat, lon)
+    if data is None:
+        raise HTTPException(status_code=404, detail="location not covered (outside the US, or over water)")
+    return _respond(data, commentary, style="rapid_fire")
+
+
+@app.get("/neighborhood/compare/national", dependencies=[Depends(require_api_key)])
+def compare_national(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
+    data = compare_to_national(lat, lon)
+    if data is None:
+        raise HTTPException(status_code=404, detail="location not covered (outside the US, or over water)")
+    return _respond(data, commentary, style="rapid_fire")
 
 
 @app.exception_handler(Exception)

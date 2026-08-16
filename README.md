@@ -2,7 +2,7 @@
 
 An API that answers "what's around here?" for wherever you're currently driving. Trigger it from a Siri Shortcut with your lat/long and get back a short, spoken-readable sentence about the area — housing values, demographics, crime, election results, or local history.
 
-> **Status: the full stack runs, publicly.** Dataset ingestion, the Postgres/PostGIS database, the FastAPI service (containerized, DeepSeek-powered spoken commentary), the live Wikipedia/Wikidata history lookup, and public HTTPS exposure (via an existing homelab Caddy reverse proxy) are all built and tested end to end — see `ingestion/`, `db/`, `api/`, and the sections below. Beyond the original plan: population density, education attainment, FEMA natural hazard risk, NCES school characteristics, and EPA walkability/built-environment data. See [`CLAUDE.md`](./CLAUDE.md) for the full architecture and [`research.md`](./research.md) for the data-source research behind it.
+> **Status: the full stack runs, publicly.** Dataset ingestion, the Postgres/PostGIS database, the FastAPI service (containerized, DeepSeek-powered spoken commentary), the live Wikipedia/Wikidata history lookup, and public HTTPS exposure (via an existing homelab Caddy reverse proxy) are all built and tested end to end — see `ingestion/`, `db/`, `api/`, and the sections below. Beyond the original plan: population density, education attainment, FEMA natural hazard risk, NCES school characteristics, EPA walkability/built-environment data, and rapid-fire stat comparisons against your state, the national average, or NYC. See [`CLAUDE.md`](./CLAUDE.md) for the full architecture and [`research.md`](./research.md) for the data-source research behind it.
 
 ## Why
 
@@ -109,8 +109,11 @@ GET /neighborhood/history/people?lat=&lon=            same, filtered to people
 GET /neighborhood/hazards?lat=&lon=                   FEMA natural hazard risk (empty until manually loaded)
 GET /neighborhood/schools?lat=&lon=                   nearby public school characteristics (not ratings)
 GET /neighborhood/walkability?lat=&lon=               EPA walkability, density, transit access
+GET /neighborhood/compare/state?lat=&lon=             rapid-fire stat comparison to the state average
+GET /neighborhood/compare/national?lat=&lon=          rapid-fire stat comparison to the national average
 GET /neighborhood?lat=&lon=&utterance=housing         free-text intent routing, e.g. "housing", "tell me
-                                                       about crime here", "compare to home", "everything"
+                                                       about crime here", "compare to home", "compare to
+                                                       the state", "compare to NYC", "everything"
 ```
 
 `utterance` is meant for a Siri Shortcut that passes dictated speech straight through, instead of hardcoding one category's URL per shortcut. DeepSeek classifies the free text into one or more of `demographics`/`housing`/`crime`/`elections`/`history`/`compare`/`hazards`/`schools`/`walkability`/`everything` (`api/llm.py`'s `classify_intent`), the response only includes data for those categories (plus a `requested_categories` field showing what was inferred), and `everything` gets a noticeably longer narration than a single-category ask (~2,600 vs. ~450 characters, measured). A vague or unparseable utterance falls back to `everything` rather than guessing narrowly. Omit `utterance` and `/neighborhood` behaves exactly as it always has.
@@ -124,6 +127,14 @@ All require an `X-API-Key` header (confirmed: missing/wrong key → 401). Every 
 Checked against the underlying data — accurate on every number. This is a deliberate departure from the original "deterministic template" plan for `summary` (see CLAUDE.md) — the model only narrates, using `db/queries.py`'s already-computed stats (`renter_pct`, `margin_pct`, `vs_state_pct`, etc.), never doing its own math.
 
 `/neighborhood/history` and its `/events`/`/people` sub-routes are live too now — `api/wikipedia.py` calls Wikipedia's GeoSearch API (distance-ordered nearby places) plus a Wikidata SPARQL query to classify each result as a person/event/site, caching the result in `history_cache` so a given location is only fetched once. Tested against Oberlin, OH (20 real results — the college, historic churches, a former train station) and Gettysburg, PA. One live finding: the Wikidata classification step hit a real `query.wikidata.org` outage/rate-limit during testing (`HTTP 429`) — it degrades gracefully (results still come back, just tagged `"other"` instead of the correct category) rather than failing the request; see `CLAUDE.md`'s "History category specifics" for a category-based fix that avoids that dependency, identified but not yet wired in.
+
+`compare_state`/`compare_usa`/`compare_nyc` utterances (or the standalone `/compare/state`, `/compare/national` endpoints) get a genuinely different response style — short stat-callout phrases instead of narrated prose, e.g. asking "compare to NYC" for Oberlin, OH produced:
+
+> *"Versus New York City: home values, about twenty-two percent. Rent, seventy-one percent. Median age, about thirty-nine years younger. Density, one percent. Jobs, six percent. Deep red, thirty-five points more Republican. Black population, four hundred percent higher. ..."*
+
+The reference area is named once up front ("Versus New York City:"), then dropped from every subsequent line — an earlier version repeated "of New York City" on every single stat, which read as too repetitive for a rapid-fire list; fixed on request.
+
+Covers politics, housing, jobs, density, demographics (age/race), schools, walkability, and education across all three comparison scopes. State/national comparisons are unweighted averages across every tract/county/block-group/school in scope (not population-weighted — a documented simplification, see `CLAUDE.md`), computed live in ~280ms even for the unfiltered nationwide query. Found and fixed a real bug building this: Postgres's `AVG()` on integer-derived columns returns a `Decimal`, which silently failed an `isinstance(x, (int, float))` check and made several diff percentages come back `null` until traced and fixed.
 
 `/neighborhood/hazards`, `/schools`, and `/walkability` are new too — FEMA National Risk Index (natural hazard risk, tract level), NCES school characteristics (enrollment/staffing/poverty-proxy, explicitly not quality ratings — no free nationwide school-rating data exists), and EPA's Smart Location Database (walkability score, residential/employment density, transit access, block-group level). `/hazards` returns `null` until the FEMA data is manually downloaded (see the data-sources table above) — the other two are fully loaded (99,259 schools, 220,740 block groups). A couple of real bugs came up building these, both documented in `CLAUDE.md`'s "New data categories": EPA's own source CSV has its GEOID columns corrupted into scientific notation (worked around by reconstructing the GEOID from separate FIPS component columns instead), and `geopandas.to_postgis()`'s Postgres `COPY`-based insert doesn't tolerate a float going into an integer column the way a normal `INSERT` would.
 

@@ -37,6 +37,29 @@ LONG_ADDENDUM = """
 
 The user explicitly asked for a full, thorough rundown of this location -- not a quick highlight. Cover every category present in the JSON in some depth (demographics, housing, crime, elections, history/historic sites, and the home comparison if present), not just the single most notable fact. This should read as a longer, complete narration, not a short summary."""
 
+# A deliberately different style from SYSTEM_PROMPT/LONG_ADDENDUM -- not a
+# narrated paragraph at all, a rapid list of short stat callouts. Used only
+# for compare_state/compare_usa/compare_nyc (see CATEGORY_INFO below).
+RAPID_FIRE_SYSTEM_PROMPT = """You are giving a rapid-fire, stat-by-stat comparison between the user's current location and a reference area (their home state, the whole USA, or New York City), for a voice assistant to read aloud while driving.
+
+You will be given structured JSON: a `comparison` dict of {target, region (or home), diff_pct} pairs, and a `political_lean` dict with a point difference in Republican vote share.
+
+This is NOT a narrated paragraph -- it's a rapid list of short, punchy callouts, one stat per phrase. Name the reference area (the state name, "the national average", or "New York City") ONCE, in a brief lead-in, then DO NOT repeat it on every line -- the listener already knows what it's being compared to. Match this tone:
+
+"Versus Ohio: walkability seventy percent. Deep red, fifty points more Republican. Density, twenty percent. Home values, about half."
+
+Not this (repeats the reference area every line -- wrong, too repetitive for rapid-fire):
+"Walkability, seventy percent of the state average. Home values, about half the state average. Twelve percent more Hispanic than the state average."
+
+Rules:
+- Cover as many categories as have real data: politics, housing cost (zhvi/zori), jobs (employment_density), population density, demographics (median_age, race percentages), schools (school_free_reduced_lunch_pct, school_pupil_teacher_ratio), walkability, education (bachelors_or_higher_pct). Skip any field that's null -- don't mention its absence.
+- Use ONLY the diff_pct/diff_points already computed in the JSON. Never do your own math or invent a percentage.
+- Politics: use political_lean's diff_points to pick a label -- roughly 0-5 points "purple"/"even", 5-15 "red"/"blue", 15+ "deep red"/"deep blue" -- and state the point number too.
+- For ratio-style stats (density, jobs, home values), it often reads better as "X%" (using diff_pct + 100, e.g. diff_pct -80 means "twenty percent") than as a raw percentage difference -- use whichever phrasing is clearer for that stat, but stay accurate to the underlying number.
+- Very short phrases, not full sentences with subjects/verbs where you can avoid it. No bullet points, no headers, no markdown -- just short spoken phrases in a row, separated by periods.
+- Round numbers the way a person would say them aloud.
+- State only facts directly present in the JSON. Never invent a number."""
+
 # Single source of truth for what `classify_intent` can return -- both
 # INTENT_SYSTEM_PROMPT and help_text() are built from this, so the model's
 # classification options and the user-facing help description can't drift
@@ -80,6 +103,18 @@ CATEGORY_INFO = {
     "walkability": {
         "description": "how walkable the area is, plus residential/employment density and transit access",
         "example": "how walkable is this area",
+    },
+    "compare_state": {
+        "description": "rapid-fire stat comparison to your home state's average -- politics, housing, jobs, density, demographics, schools, walkability, education",
+        "example": "compare to the state",
+    },
+    "compare_usa": {
+        "description": "rapid-fire stat comparison to the nationwide average -- politics, housing, jobs, density, demographics, schools, walkability, education",
+        "example": "compare to the USA",
+    },
+    "compare_nyc": {
+        "description": "rapid-fire stat comparison to New York City specifically",
+        "example": "compare to NYC",
     },
     "everything": {
         "description": "a full, longer rundown covering every category above",
@@ -147,16 +182,24 @@ def classify_intent(utterance: str) -> list[str]:
     return categories or ["everything"]
 
 
-def generate_commentary(data: dict, long: bool = False) -> str:
+def generate_commentary(data: dict, style: str = "normal") -> str:
+    """style: "normal" (default, a few narrated sentences), "long" (fuller
+    narration, used for "everything"), or "rapid_fire" (short stat-by-stat
+    callouts, used for compare_state/compare_usa/compare_nyc)."""
     client = _get_client()
-    system_prompt = SYSTEM_PROMPT + LONG_ADDENDUM if long else SYSTEM_PROMPT
+    if style == "long":
+        system_prompt, max_tokens = SYSTEM_PROMPT + LONG_ADDENDUM, 900
+    elif style == "rapid_fire":
+        system_prompt, max_tokens = RAPID_FIRE_SYSTEM_PROMPT, 600
+    else:
+        system_prompt, max_tokens = SYSTEM_PROMPT, 300
     resp = client.chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(data, default=str)},
         ],
-        max_tokens=900 if long else 300,
+        max_tokens=max_tokens,
         temperature=0.7,
     )
     return resp.choices[0].message.content.strip()

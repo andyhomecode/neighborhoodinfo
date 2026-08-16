@@ -231,6 +231,15 @@ def get_demographics(tract_geoid: str) -> dict | None:
             d.get(k) or 0 for k in ("bachelors_degree", "masters_degree", "professional_degree", "doctorate_degree")
         )
         d["bachelors_or_higher_pct"] = round(100 * higher_ed / d["population_25_plus"], 1)
+    if d.get("total_population"):
+        for count_field, pct_field in (
+            ("population_white_alone", "white_pct"),
+            ("population_black_alone", "black_pct"),
+            ("population_asian_alone", "asian_pct"),
+            ("population_hispanic_or_latino", "hispanic_pct"),
+        ):
+            if d.get(count_field) is not None:
+                d[pct_field] = round(100 * d[count_field] / d["total_population"], 1)
     return d
 
 
@@ -663,6 +672,7 @@ def compare_to_home(lat: float, lon: float, home_zip: str = "10002") -> dict | N
     t_hv, h_hv = target["home_values"] or {}, home["home_values"] or {}
     t_rate, h_rate = target["crime_rate"] or {}, home["crime_rate"] or {}
     t_elec, h_elec = target["elections"] or {}, home["elections"] or {}
+    t_built, h_built = target["built_environment"] or {}, home["built_environment"] or {}
 
     # Crime rate comparison is suppressed entirely (not just a caveat) unless
     # BOTH sides clear MIN_RELIABLE_INCIDENTS -- comparing against a
@@ -681,6 +691,14 @@ def compare_to_home(lat: float, lon: float, home_zip: str = "10002") -> dict | N
         "zhvi": (t_hv.get("zhvi"), h_hv.get("zhvi")),
         "zori": (t_hv.get("zori"), h_hv.get("zori")),
         "crime_rate_per_100k": crime_rate_pair,
+        "population_density": (t_demo.get("population_density"), h_demo.get("population_density")),
+        "bachelors_or_higher_pct": (t_demo.get("bachelors_or_higher_pct"), h_demo.get("bachelors_or_higher_pct")),
+        "white_pct": (t_demo.get("white_pct"), h_demo.get("white_pct")),
+        "black_pct": (t_demo.get("black_pct"), h_demo.get("black_pct")),
+        "hispanic_pct": (t_demo.get("hispanic_pct"), h_demo.get("hispanic_pct")),
+        "asian_pct": (t_demo.get("asian_pct"), h_demo.get("asian_pct")),
+        "walkability_index": (t_built.get("walkability_index"), h_built.get("walkability_index")),
+        "employment_density": (t_built.get("employment_density"), h_built.get("employment_density")),
     }
     comparison = {
         name: {"target": t, "home": h, "diff_pct": _pct_diff(t, h)} for name, (t, h) in fields.items()
@@ -759,3 +777,226 @@ def compare_to_home(lat: float, lon: float, home_zip: str = "10002") -> dict | N
         "political_lean": political_lean,
         "crime_by_category": crime_by_category,
     }
+
+
+# FIPS -> full state name, for "compare to state" labeling (e.g. "vs Ohio"
+# rather than "vs OH"). Keys match ingestion/_common.py's STATE_FIPS, whose
+# values are 2-letter abbreviations instead -- this is a separate, purpose-
+# built dict rather than reusing that one, since ingestion/ isn't a
+# dependency of db/ and shouldn't become one just for this.
+STATE_NAMES = {
+    "01": "Alabama", "02": "Alaska", "04": "Arizona", "05": "Arkansas", "06": "California",
+    "08": "Colorado", "09": "Connecticut", "10": "Delaware", "11": "District of Columbia",
+    "12": "Florida", "13": "Georgia", "15": "Hawaii", "16": "Idaho", "17": "Illinois",
+    "18": "Indiana", "19": "Iowa", "20": "Kansas", "21": "Kentucky", "22": "Louisiana",
+    "23": "Maine", "24": "Maryland", "25": "Massachusetts", "26": "Michigan", "27": "Minnesota",
+    "28": "Mississippi", "29": "Missouri", "30": "Montana", "31": "Nebraska", "32": "Nevada",
+    "33": "New Hampshire", "34": "New Jersey", "35": "New Mexico", "36": "New York",
+    "37": "North Carolina", "38": "North Dakota", "39": "Ohio", "40": "Oklahoma", "41": "Oregon",
+    "42": "Pennsylvania", "44": "Rhode Island", "45": "South Carolina", "46": "South Dakota",
+    "47": "Tennessee", "48": "Texas", "49": "Utah", "50": "Vermont", "51": "Virginia",
+    "53": "Washington", "54": "West Virginia", "55": "Wisconsin", "56": "Wyoming",
+    "60": "American Samoa", "66": "Guam", "69": "Northern Mariana Islands",
+    "72": "Puerto Rico", "78": "U.S. Virgin Islands",
+}
+
+# FIPS -> 2-letter USPS abbreviation, needed only to filter `schools.state`
+# (which stores the abbreviation, not FIPS -- confirmed against the real
+# NCES data). Derived from STATE_NAMES's keys so the two can't drift apart
+# on which codes exist, even though the values serve different purposes.
+_STATE_ABBR = {
+    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO", "09": "CT", "10": "DE",
+    "11": "DC", "12": "FL", "13": "GA", "15": "HI", "16": "ID", "17": "IL", "18": "IN", "19": "IA",
+    "20": "KS", "21": "KY", "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
+    "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH", "34": "NJ", "35": "NM",
+    "36": "NY", "37": "NC", "38": "ND", "39": "OH", "40": "OK", "41": "OR", "42": "PA", "44": "RI",
+    "45": "SC", "46": "SD", "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
+    "54": "WV", "55": "WI", "56": "WY", "60": "AS", "66": "GU", "69": "MP", "72": "PR", "78": "VI",
+}
+
+
+def _regional_stats(state_fips: str | None) -> dict:
+    """Unweighted average of key stats across every tract/county/block
+    group/school either within one state (state_fips given) or nationwide
+    (state_fips=None). A simplification, not a population-weighted
+    statistic -- "average of county medians" isn't the literal US median,
+    same kind of documented approximation get_crime_rate already makes.
+    Good enough for a rapid-fire comparison, not a rigorous stat."""
+    scope = " WHERE LEFT(geoid, 2) = :sf" if state_fips else ""
+    params = {"sf": state_fips} if state_fips else {}
+
+    with engine.connect() as conn:
+        demo = conn.execute(
+            text(
+                f"""
+                SELECT
+                    AVG(median_age) AS median_age,
+                    AVG(median_household_income) AS median_household_income,
+                    AVG(median_gross_rent) AS median_gross_rent,
+                    AVG(100.0 * renter_occupied_units / NULLIF(occupied_housing_units, 0)) AS renter_pct,
+                    AVG(100.0 * population_white_alone / NULLIF(total_population, 0)) AS white_pct,
+                    AVG(100.0 * population_black_alone / NULLIF(total_population, 0)) AS black_pct,
+                    AVG(100.0 * population_hispanic_or_latino / NULLIF(total_population, 0)) AS hispanic_pct,
+                    AVG(100.0 * population_asian_alone / NULLIF(total_population, 0)) AS asian_pct,
+                    AVG(100.0 * (bachelors_degree + masters_degree + professional_degree + doctorate_degree)
+                        / NULLIF(population_25_plus, 0)) AS bachelors_or_higher_pct
+                FROM demographics
+                {scope}
+                """
+            ),
+            params,
+        ).mappings().fetchone()
+
+        density_scope = " WHERE LEFT(d.geoid, 2) = :sf" if state_fips else ""
+        density = conn.execute(
+            text(
+                f"""
+                SELECT AVG(d.total_population / NULLIF(g.aland_sq_m / {SQ_METERS_PER_SQ_MILE}, 0)) AS population_density
+                FROM demographics d JOIN geographies g ON g.geoid = d.geoid AND g.geo_type = 'tract'
+                {density_scope}
+                """
+            ),
+            params,
+        ).mappings().fetchone()
+
+        housing = conn.execute(
+            text(f"SELECT AVG(zhvi) AS zhvi, AVG(zori) AS zori FROM home_values{scope}"), params
+        ).mappings().fetchone()
+
+        elec = conn.execute(
+            text(f"SELECT SUM(votes_gop) AS votes_gop, SUM(votes_dem) AS votes_dem FROM elections{scope}"), params
+        ).mappings().fetchone()
+
+        built = conn.execute(
+            text(f"SELECT AVG(walkability_index) AS walkability_index, AVG(employment_density) AS employment_density "
+                 f"FROM built_environment{scope}"),
+            params,
+        ).mappings().fetchone()
+
+        school_scope = " WHERE state = :abbr" if state_fips else ""
+        school_params = {"abbr": _STATE_ABBR[state_fips]} if state_fips else {}
+        schools = conn.execute(
+            text(f"SELECT AVG(free_reduced_lunch_pct) AS free_reduced_lunch_pct, AVG(pupil_teacher_ratio) AS pupil_teacher_ratio "
+                 f"FROM schools{school_scope}"),
+            school_params,
+        ).mappings().fetchone()
+
+    gop_two_party_pct = None
+    if elec["votes_gop"] is not None and elec["votes_dem"] is not None:
+        two_party = elec["votes_gop"] + elec["votes_dem"]
+        gop_two_party_pct = round(100 * elec["votes_gop"] / two_party, 1) if two_party else None
+
+    def r(v, digits=1):
+        # float(), not just round() -- Postgres's AVG() on an
+        # Integer-derived expression returns `numeric`, which psycopg2 maps
+        # to Python's Decimal, not float. round(Decimal, n) stays a
+        # Decimal, and _pct_diff's isinstance(x, (int, float)) check
+        # silently rejects Decimal -- confirmed live: every field sourced
+        # from an Integer column (income, rent, renter/race/education
+        # percentages) came back with diff_pct always None until this cast,
+        # while Float-column fields (age, density, zhvi, walkability) were
+        # unaffected and worked by accident.
+        return round(float(v), digits) if v is not None else None
+
+    return {
+        "median_age": r(demo["median_age"]),
+        "median_household_income": r(demo["median_household_income"], 0),
+        "median_gross_rent": r(demo["median_gross_rent"], 0),
+        "renter_pct": r(demo["renter_pct"]),
+        "white_pct": r(demo["white_pct"]),
+        "black_pct": r(demo["black_pct"]),
+        "hispanic_pct": r(demo["hispanic_pct"]),
+        "asian_pct": r(demo["asian_pct"]),
+        "bachelors_or_higher_pct": r(demo["bachelors_or_higher_pct"]),
+        "population_density": r(density["population_density"]),
+        "zhvi": r(housing["zhvi"], 0),
+        "zori": r(housing["zori"], 0),
+        "gop_two_party_pct": r(gop_two_party_pct),
+        "walkability_index": r(built["walkability_index"]),
+        "employment_density": r(built["employment_density"], 2),
+        "school_free_reduced_lunch_pct": r(schools["free_reduced_lunch_pct"]),
+        "school_pupil_teacher_ratio": r(schools["pupil_teacher_ratio"]),
+    }
+
+
+def _region_comparison(lat: float, lon: float, state_fips: str | None, region_name: str) -> dict | None:
+    """Shared implementation for compare_to_state/compare_to_national --
+    target's own stats (reusing the same per-category functions every
+    other endpoint uses) vs. a regional average (_regional_stats). Returns
+    a `comparison` dict shaped like compare_to_home's, plus `political_lean`,
+    so all three comparison types (home/state/national) are narratable the
+    same way."""
+    location = resolve_location(lat, lon)
+    if location is None:
+        return None
+
+    demo = get_demographics(location["tract_geoid"]) or {}
+    home_values = get_home_values(location["county_geoid"]) or {}
+    elections = get_elections(location["county_geoid"]) or {}
+    built_env = get_built_environment(location["block_group_geoid"]) or {}
+    nearby_schools = get_nearby_schools(lat, lon)
+
+    def avg(vals):
+        vals = [v for v in vals if v is not None]
+        return round(sum(vals) / len(vals), 1) if vals else None
+
+    target = {
+        "median_age": demo.get("median_age"),
+        "median_household_income": demo.get("median_household_income"),
+        "median_gross_rent": demo.get("median_gross_rent"),
+        "renter_pct": demo.get("renter_pct"),
+        "white_pct": demo.get("white_pct"),
+        "black_pct": demo.get("black_pct"),
+        "hispanic_pct": demo.get("hispanic_pct"),
+        "asian_pct": demo.get("asian_pct"),
+        "bachelors_or_higher_pct": demo.get("bachelors_or_higher_pct"),
+        "population_density": demo.get("population_density"),
+        "zhvi": home_values.get("zhvi"),
+        "zori": home_values.get("zori"),
+        "gop_two_party_pct": elections.get("gop_two_party_pct"),
+        "walkability_index": built_env.get("walkability_index"),
+        "employment_density": built_env.get("employment_density"),
+        "school_free_reduced_lunch_pct": avg(s.get("free_reduced_lunch_pct") for s in nearby_schools),
+        "school_pupil_teacher_ratio": avg(s.get("pupil_teacher_ratio") for s in nearby_schools),
+    }
+    region = _regional_stats(state_fips)
+
+    comparison = {
+        name: {"target": target[name], "region": region[name], "diff_pct": _pct_diff(target[name], region[name])}
+        for name in target
+    }
+
+    political_lean = None
+    if target["gop_two_party_pct"] is not None and region["gop_two_party_pct"] is not None:
+        diff_points = round(target["gop_two_party_pct"] - region["gop_two_party_pct"], 1)
+        political_lean = {
+            "target_gop_pct": target["gop_two_party_pct"],
+            "region_gop_pct": region["gop_two_party_pct"],
+            "diff_points": diff_points,
+            "direction": "more Republican" if diff_points > 0 else "more Democratic" if diff_points < 0 else "the same",
+        }
+
+    return {
+        "region_name": region_name,
+        "target_location": location,
+        "comparison": comparison,
+        "political_lean": political_lean,
+    }
+
+
+def compare_to_state(lat: float, lon: float) -> dict | None:
+    """Target location vs. the unweighted average of every tract/county/
+    block group/school in its own state. None if the location can't be
+    resolved."""
+    location = resolve_location(lat, lon)
+    if location is None:
+        return None
+    state_name = STATE_NAMES.get(location["state_fips"], location["state_fips"])
+    return _region_comparison(lat, lon, location["state_fips"], state_name)
+
+
+def compare_to_national(lat: float, lon: float) -> dict | None:
+    """Target location vs. the unweighted nationwide average of every
+    tract/county/block group/school. None if the location can't be
+    resolved."""
+    return _region_comparison(lat, lon, None, "the United States")
