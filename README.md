@@ -142,6 +142,22 @@ Publicly reachable at `https://server.maxwell.nyc/neighborhoodapi/...` via an ex
 
 `test_public_api.py <lat> <lon> [--path ...] [--utterance "..."] [--home-zip ...] [--no-commentary]` smoke-tests the real public URL end to end (Cloudflare → Caddy → the container) — stdlib only, no venv needed, reads `API_KEY` straight from `.env`. Different from `test_lookup.py` above, which only exercises `db/queries.py` directly against the local database, not the HTTP layer at all.
 
+## Siri Shortcut
+
+Working end to end on iPhone — a single shortcut handles every category and utterance via a two-turn voice flow:
+
+<img src="shortcut1.png" width="360" alt="Shortcut steps: Get current location, Ask for Text input, URL Encode the answer, build the request URL, Get contents of URL, Get Value for summary"> <img src="shortcut2.png" width="360" alt="Shortcut steps continued: URL Encode, build URL, Get contents of URL, Get Value for summary, Speak">
+
+1. **Get Current Location**
+2. **Ask for Input** (Text), prompt: *"What do you want to know?"* — when triggered via Siri, this prompts and listens by voice automatically.
+3. **URL Encode** the answer from step 2 — necessary because a raw, unencoded utterance (e.g. a space in "compare to state") breaks the query string. Built as its own action rather than relying on auto-encoding, since typing the URL directly into a **Text** action (as this shortcut does, to see the full URL for debugging) does *not* auto-encode inserted variables the way inserting them straight into a `URL` action's query fields would.
+4. **Text**, building the request URL: `https://server.maxwell.nyc/neighborhoodapi/neighborhood?lat=[Latitude]&lon=[Longitude]&utterance=[URL Encoded Text]`
+5. **Get Contents of URL**, with the `X-API-Key` header set (not visible in these screenshots — configured under the action's "Show More").
+6. **Get Value** for `summary` in the response.
+7. **Speak** the summary.
+
+Invocation: "Hey Siri, [shortcut name]" → Siri asks "What do you want to know?" → say anything the API understands (`"compare to the state"`, `"is this area at risk of flooding"`, `"help"`, or nothing in particular for the full summary) → it speaks the result.
+
 ## Architecture
 
 - **Postgres + PostGIS** — the only datastore, everything keyed by Census GEOID. Running.
