@@ -266,13 +266,14 @@ def load_historic_sites():
 
 
 # FEMA NRI tract-level CSV column names -> this table's snake_case columns.
-# Best-effort draft against NRI's documented naming convention (4-letter
-# hazard codes + "_RISKS" suffix) -- NOT verified against a real downloaded
-# header (see ingestion/download_fema_nri.py's docstring for why: every
-# automated fetch attempt was blocked). load_hazard_risk() loads whatever
-# subset of these actually matches the real file and prints the rest as
-# unmatched, rather than crashing on a wrong guess -- fix this mapping once
-# a real file's header is visible.
+# Confirmed against a real downloaded header (v1.20, Dec 2025, manually
+# placed in datasets/fema_nri/ per download_fema_nri.py's docstring -- every
+# automated fetch attempt against fema.gov was blocked). One code was wrong
+# in the original best-effort draft before a real file existed: inland
+# flooding is IFLD, not the guessed RFLD -- everything else matched.
+# load_hazard_risk() still loads whatever subset of these actually matches
+# and reports the rest as unmatched rather than crashing, in case a future
+# NRI release renames something again.
 NRI_COLUMN_MAP = {
     "TRACTFIPS": "geoid",
     "RISK_SCORE": "risk_score",
@@ -289,7 +290,7 @@ NRI_COLUMN_MAP = {
     "HWAV_RISKS": "heat_wave_risk_score",
     "HRCN_RISKS": "hurricane_risk_score",
     "ISTM_RISKS": "ice_storm_risk_score",
-    "RFLD_RISKS": "inland_flooding_risk_score",
+    "IFLD_RISKS": "inland_flooding_risk_score",
     "LNDS_RISKS": "landslide_risk_score",
     "LTNG_RISKS": "lightning_risk_score",
     "SWND_RISKS": "strong_wind_risk_score",

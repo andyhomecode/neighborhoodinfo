@@ -16,9 +16,9 @@ SYSTEM_PROMPT = """You are narrating interesting facts about a place to someone 
 You will be given structured JSON: demographics, home values, crime, 2024 election results, historic sites, and sometimes a comparison to the listener's home location.
 
 Write a few short sentences suitable for text-to-speech. Rules:
-- Strongly prefer facts directly present in the JSON. Add data points or commentary to explain outlier data (examples: High drug crime rate for area, if LLM knows opiod crisis is bad in region add note.  If demographics espeically young, and you know it's a college town, note that.)  
+- Every number and statistic you state MUST come directly from the JSON -- home values, population, crime rates, election results, demographics, all of it. Never invent, estimate, or guess a statistic, even one you believe you know the real-world value of for this place. You MAY add a brief real-world aside to help explain a stat that IS already present in the JSON (e.g. the JSON shows a high drug-crime rate and you know the region has an opioid crisis, or the JSON shows an unusually young median age and you know it's a college town) -- but only as a short clause commenting on a number that's actually there, never as a new standalone fact with its own number.
 - always state the name of the location, like city, town, and county.
-- always state the property information such as median home price and renter percentage if possible.
+- If the JSON includes property/housing fields (median home price, rent, renter percentage), always mention them. If it doesn't (e.g. a request that only asked about one other category), skip this instruction entirely -- do not mention that home price is missing, do not guess at one, and do not narrate your own uncertainty about it (never say things like "wait, that's not in the data" out loud -- if you're not sure a number belongs in your answer, the fix is to not say that number, not to say it and then retract it).
 - always include demographic information if available
 - if crime is higher or lower than average, include crime rates
 - Do not do your own math -- use the numbers and percentages already computed in the JSON (e.g. renter_pct, vs_state_pct, margin_pct) rather than calculating your own from raw counts.
@@ -26,9 +26,8 @@ Write a few short sentences suitable for text-to-speech. Rules:
 - Round numbers the way a person would say them aloud ("about sixty thousand dollars", not "59,987.42").
 - Concise robotic tone. not conversational or breezy. No bullet points, no headers, no markdown. Just reading stats and data
 - If home-comparison data is present, you may reference it, but don't force it if nothing about it is actually interesting.
-- if there is something notable about the data and the location that you know, like the high drug crime rate maps to known info about opiod addiction in the region, mention it breifly
 - for politics, call republican red or deep red, and democrat blue or deep blue in addition to the lean percentage
-- If a field is null/missing/None, don't mention it -- don't say "data is unavailable," just skip it.
+- If a field is null/missing/None, don't mention it -- don't say "data is unavailable," just skip it and move on to whatever real fields ARE present. Exception: if the entire JSON has nothing substantive in it (every field is null/empty), say plainly in one short sentence that there's no data for this location -- do not fill the gap with information from your own general knowledge of the place instead.
 - If school data (schools/enrollment/pupil_teacher_ratio/free_reduced_lunch_pct) is present, describe it only as characteristics -- never call a school "good" or "bad," never imply a quality rating or ranking, and never infer quality from free_reduced_lunch_pct (a poverty indicator, not a performance measure). No school-quality data exists in this JSON; do not invent an impression of one.
 """
 
@@ -182,10 +181,37 @@ def classify_intent(utterance: str) -> list[str]:
     return categories or ["everything"]
 
 
+# Always-present keys that aren't themselves narratable content -- excluded
+# when deciding whether a response has anything real to say. Keep in sync
+# with whatever api/main.py adds to `data` beyond actual category fields.
+_METADATA_KEYS = {"location", "requested_categories", "available_categories"}
+
+
+def _has_real_content(data: dict) -> bool:
+    return any(v not in (None, [], {}) for k, v in data.items() if k not in _METADATA_KEYS)
+
+
 def generate_commentary(data: dict, style: str = "normal") -> str:
     """style: "normal" (default, a few narrated sentences), "long" (fuller
     narration, used for "everything"), or "rapid_fire" (short stat-by-stat
-    callouts, used for compare_state/compare_usa/compare_nyc)."""
+    callouts, used for compare_state/compare_usa/compare_nyc).
+
+    Skips the DeepSeek call entirely (deterministic fallback string
+    instead) when `data` has nothing substantive in it -- e.g. a single
+    category whose lookup came back None/empty, like /neighborhood/hazards
+    before FEMA data is loaded. Confirmed live that leaving this to the
+    model alone isn't reliable: with a near-empty JSON (just `location` +
+    one null field), the model fabricated an entire paragraph of invented
+    stats (home value, population, crime, election results) in 2 of 3
+    otherwise-identical test calls, despite the prompt's explicit
+    "never invent" rule -- temperature=0.7 sampling variance around a rule
+    the model doesn't always follow under-constrained. This check makes
+    the empty case correct by construction instead of by hoping the model
+    complies every time."""
+    if not _has_real_content(data):
+        topics = ", ".join(k.replace("_", " ") for k in data if k not in _METADATA_KEYS)
+        return f"No {topics} data available for this location." if topics else "No data available for this location."
+
     client = _get_client()
     if style == "long":
         system_prompt, max_tokens = SYSTEM_PROMPT + LONG_ADDENDUM, 900
