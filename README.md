@@ -2,7 +2,7 @@
 
 An API that answers "what's around here?" for wherever you're currently driving. Trigger it from a Siri Shortcut with your lat/long and get back a short, spoken-readable sentence about the area — housing values, demographics, crime, election results, or local history.
 
-> **Status: the full stack runs, publicly.** Dataset ingestion, the Postgres/PostGIS database, the FastAPI service (containerized, DeepSeek-powered spoken commentary), the live Wikipedia/Wikidata history lookup, and public HTTPS exposure (via an existing homelab Caddy reverse proxy) are all built and tested end to end — see `ingestion/`, `db/`, `api/`, and the sections below. See [`CLAUDE.md`](./CLAUDE.md) for the full architecture and [`research.md`](./research.md) for the data-source research behind it.
+> **Status: the full stack runs, publicly.** Dataset ingestion, the Postgres/PostGIS database, the FastAPI service (containerized, DeepSeek-powered spoken commentary), the live Wikipedia/Wikidata history lookup, and public HTTPS exposure (via an existing homelab Caddy reverse proxy) are all built and tested end to end — see `ingestion/`, `db/`, `api/`, and the sections below. Beyond the original plan: population density, education attainment, FEMA natural hazard risk, NCES school characteristics, and EPA walkability/built-environment data. See [`CLAUDE.md`](./CLAUDE.md) for the full architecture and [`research.md`](./research.md) for the data-source research behind it.
 
 ## Why
 
@@ -32,6 +32,10 @@ Every source downloads with a script — no browser required, except crime, wher
 | ZIP code centroids (for resolving a ZIP to a lat/long, e.g. "compare to home") | Census Gazetteer ZCTA file | `ingestion/download_zcta.py` | None |
 | Local crime supplement (NYC only — one-off exception, see below) | NYC Open Data / NYPD complaint data (Socrata) | `ingestion/download_nypd_crime.py` | None |
 | Historic summary / notable people & events | Wikipedia / Wikidata | `api/wikipedia.py` — not a batch script, called live by the API and cached per location in `history_cache` | None |
+| Population density, education attainment | Census TIGER (`ALAND`) / ACS (already-pulled sources, no new script) | `ingestion/download_tiger.py`, `ingestion/download_acs.py` | None |
+| Natural hazard risk (18 hazard types) | FEMA National Risk Index | `ingestion/download_fema_nri.py --check` | Download is fully manual — FEMA's site blocks every scripted fetch attempted (see `CLAUDE.md`). Get the tract-level CSV from [hazards.fema.gov/nri/data-resources](https://hazards.fema.gov/nri/data-resources) and drop into `datasets/fema_nri/`. |
+| School characteristics (enrollment, staffing, poverty proxy — not quality ratings) | NCES Common Core of Data | `ingestion/download_nces_ccd.py` | None |
+| Walkability, density, transit access | EPA Smart Location Database | `ingestion/download_epa_sld.py` | None |
 
 Note: we initially assumed FBI crime data would end up state-level only (the easy download is a small state/national estimates file) — see `CLAUDE.md` for why we upgraded to the full incident-level NIBRS file instead, which gets us real county-level counts. Running it against the 2025 file: 70M lines / 13.3M offense records parsed in ~2.5 minutes, covering 2,899 of ~3,143 US counties (92% — matches known NIBRS agency participation gaps).
 
@@ -51,6 +55,9 @@ cp .env.example .env   # fill in CENSUS_API_KEY
 .venv/bin/python download_zcta.py
 .venv/bin/python download_nypd_crime.py
 .venv/bin/python parse_nibrs.py 2025   # after manually dropping nibrs-2025.zip + nibrs-help.zip into datasets/fbi_crime/
+.venv/bin/python download_nces_ccd.py
+.venv/bin/python download_epa_sld.py   # ~200MB
+.venv/bin/python download_fema_nri.py  # prints manual-download steps -- FEMA's site blocks scripted fetches
 ```
 
 Downloaded files land in `datasets/` (gitignored — it's ~1GB and growing, not meant to be committed).
@@ -63,7 +70,7 @@ ingestion/.venv/bin/python -m db.load                    # from repo root: loads
 ingestion/.venv/bin/python test_lookup.py <lat> <lon>    # try a location
 ```
 
-`db/load.py` does a full drop-and-reload every run (~121k geography rows, 85k tract-level demographics rows, 92k historic sites, etc. — a few minutes). `db/queries.py` is the query library the `api` service calls directly (`resolve_location`, `get_demographics`, `get_home_values`, `get_crime`, `get_crime_rate`, `get_crime_by_category`, `get_elections`, `get_historic_sites`, `get_neighborhood_summary`, `resolve_zip`, `compare_to_home`, `get_local_crime`, `get_local_crime_rate`, `get_local_crime_by_category`) — every function returns plain dicts, no ORM objects. Originally built so a template engine could generate the spoken sentence deterministically; the API ended up using DeepSeek for that instead (see below), so the real payoff of "every field is precomputed, not a raw count" turned out to be keeping the LLM from doing its own arithmetic, not powering a template.
+`db/load.py` does a full drop-and-reload every run (~364k geography rows including block groups, 85k tract-level demographics rows, 92k historic sites, 99k schools, 221k built-environment block groups, etc. — a few minutes). `db/queries.py` is the query library the `api` service calls directly (`resolve_location`, `get_demographics`, `get_home_values`, `get_crime`, `get_crime_rate`, `get_crime_by_category`, `get_elections`, `get_historic_sites`, `get_hazard_risk`, `get_nearby_schools`, `get_built_environment`, `get_neighborhood_summary`, `resolve_zip`, `compare_to_home`, `get_local_crime`, `get_local_crime_rate`, `get_local_crime_by_category`) — every function returns plain dicts, no ORM objects. `get_demographics` also derives `population_density` and `bachelors_or_higher_pct` at query time now, same pattern as `renter_pct`. Originally built so a template engine could generate the spoken sentence deterministically; the API ended up using DeepSeek for that instead (see below), so the real payoff of "every field is precomputed, not a raw count" turned out to be keeping the LLM from doing its own arithmetic, not powering a template.
 
 `compare_to_home(lat, lon, home_zip="10002")` compares any location against a fixed home ZIP's stats (income, rent, home value, renter %, crime rate, 2024 election). Finding this surfaced immediately: NYC's own crime data isn't reliable enough to compare against — all 5 boroughs combined show 2 recorded incidents for all of 2025 in the FBI's NIBRS file (NYPD hasn't meaningfully transitioned to NIBRS reporting), versus hundreds of thousands for LA/Chicago/Houston. `get_crime_rate` and `compare_to_home` both detect and suppress this (`MIN_RELIABLE_INCIDENTS` in `db/queries.py`) rather than silently producing something like "2,000,000% higher than home."
 
@@ -99,13 +106,16 @@ GET /neighborhood/compare?lat=&lon=&home_zip=10002    vs. a home ZIP -- income, 
 GET /neighborhood/history?lat=&lon=                   nearby Wikipedia places/topics, live call, cached
 GET /neighborhood/history/events?lat=&lon=            same, filtered to events
 GET /neighborhood/history/people?lat=&lon=            same, filtered to people
+GET /neighborhood/hazards?lat=&lon=                   FEMA natural hazard risk (empty until manually loaded)
+GET /neighborhood/schools?lat=&lon=                   nearby public school characteristics (not ratings)
+GET /neighborhood/walkability?lat=&lon=               EPA walkability, density, transit access
 GET /neighborhood?lat=&lon=&utterance=housing         free-text intent routing, e.g. "housing", "tell me
                                                        about crime here", "compare to home", "everything"
 ```
 
-`utterance` is meant for a Siri Shortcut that passes dictated speech straight through, instead of hardcoding one category's URL per shortcut. DeepSeek classifies the free text into one or more of `demographics`/`housing`/`crime`/`elections`/`history`/`compare`/`everything` (`api/llm.py`'s `classify_intent`), the response only includes data for those categories (plus a `requested_categories` field showing what was inferred), and `everything` gets a noticeably longer narration than a single-category ask (~2,600 vs. ~450 characters, measured). A vague or unparseable utterance falls back to `everything` rather than guessing narrowly. Omit `utterance` and `/neighborhood` behaves exactly as it always has.
+`utterance` is meant for a Siri Shortcut that passes dictated speech straight through, instead of hardcoding one category's URL per shortcut. DeepSeek classifies the free text into one or more of `demographics`/`housing`/`crime`/`elections`/`history`/`compare`/`hazards`/`schools`/`walkability`/`everything` (`api/llm.py`'s `classify_intent`), the response only includes data for those categories (plus a `requested_categories` field showing what was inferred), and `everything` gets a noticeably longer narration than a single-category ask (~2,600 vs. ~450 characters, measured). A vague or unparseable utterance falls back to `everything` rather than guessing narrowly. Omit `utterance` and `/neighborhood` behaves exactly as it always has.
 
-Ask `utterance=help` (or anything like "what can I ask") for a spoken rundown of what this API understands — a fixed, non-LLM-generated string, so it can't describe a capability that doesn't exist. Works even when the coordinates can't be resolved to a location, since it doesn't need one.
+Ask `utterance=help` (or anything like "what can I ask") for a concise keyword-style rundown of what this API understands (e.g. `"Topics: demographics, housing, crime, ..., everything."`) — a fixed, non-LLM-generated string, so it can't describe a capability that doesn't exist. Works even when the coordinates can't be resolved to a location, since it doesn't need one.
 
 All require an `X-API-Key` header (confirmed: missing/wrong key → 401). Every response is `{"summary": "...", "data": {...}}`. `data` is `db/queries.py`'s output, unchanged. `summary` is real DeepSeek commentary (`?commentary=false` skips the LLM call if you just want the raw data faster/free) — for example, hitting `/neighborhood/compare` for a point in Oberlin, OH against home ZIP 10002 produced:
 
@@ -114,6 +124,8 @@ All require an `X-API-Key` header (confirmed: missing/wrong key → 401). Every 
 Checked against the underlying data — accurate on every number. This is a deliberate departure from the original "deterministic template" plan for `summary` (see CLAUDE.md) — the model only narrates, using `db/queries.py`'s already-computed stats (`renter_pct`, `margin_pct`, `vs_state_pct`, etc.), never doing its own math.
 
 `/neighborhood/history` and its `/events`/`/people` sub-routes are live too now — `api/wikipedia.py` calls Wikipedia's GeoSearch API (distance-ordered nearby places) plus a Wikidata SPARQL query to classify each result as a person/event/site, caching the result in `history_cache` so a given location is only fetched once. Tested against Oberlin, OH (20 real results — the college, historic churches, a former train station) and Gettysburg, PA. One live finding: the Wikidata classification step hit a real `query.wikidata.org` outage/rate-limit during testing (`HTTP 429`) — it degrades gracefully (results still come back, just tagged `"other"` instead of the correct category) rather than failing the request; see `CLAUDE.md`'s "History category specifics" for a category-based fix that avoids that dependency, identified but not yet wired in.
+
+`/neighborhood/hazards`, `/schools`, and `/walkability` are new too — FEMA National Risk Index (natural hazard risk, tract level), NCES school characteristics (enrollment/staffing/poverty-proxy, explicitly not quality ratings — no free nationwide school-rating data exists), and EPA's Smart Location Database (walkability score, residential/employment density, transit access, block-group level). `/hazards` returns `null` until the FEMA data is manually downloaded (see the data-sources table above) — the other two are fully loaded (99,259 schools, 220,740 block groups). A couple of real bugs came up building these, both documented in `CLAUDE.md`'s "New data categories": EPA's own source CSV has its GEOID columns corrupted into scientific notation (worked around by reconstructing the GEOID from separate FIPS component columns instead), and `geopandas.to_postgis()`'s Postgres `COPY`-based insert doesn't tolerate a float going into an integer column the way a normal `INSERT` would.
 
 Publicly reachable at `https://server.maxwell.nyc/neighborhoodapi/...` via an existing homelab Caddy reverse proxy (Cloudflare → Caddy → `localhost:8000`), not a dedicated tunnel container in this repo — see `CLAUDE.md`'s "Public exposure" for the routing config and a real gotcha hit while setting it up (a Docker bind-mount-inode quirk that made a `Caddyfile` edit silently not take effect until the container was restarted).
 

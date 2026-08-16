@@ -45,6 +45,13 @@ VARIABLES = {
     "B25024_010E": "units_mobile_home",
     # Housing age
     "B25035_001E": "median_year_built",
+    # Educational attainment (population 25+) -- codes confirmed against
+    # api.census.gov/data/2023/acs/acs5/groups/B15003.html
+    "B15003_001E": "population_25_plus",
+    "B15003_022E": "bachelors_degree",
+    "B15003_023E": "masters_degree",
+    "B15003_024E": "professional_degree",
+    "B15003_025E": "doctorate_degree",
 }
 
 

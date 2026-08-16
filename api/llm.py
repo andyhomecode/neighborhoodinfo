@@ -16,7 +16,7 @@ SYSTEM_PROMPT = """You are narrating interesting facts about a place to someone 
 You will be given structured JSON: demographics, home values, crime, 2024 election results, historic sites, and sometimes a comparison to the listener's home location.
 
 Write a few short sentences suitable for text-to-speech. Rules:
-- State only facts directly present in the JSON. Never invent, estimate, or guess anything not in the data.
+- Strongly prefer facts directly present in the JSON. Add data points or commentary to explain outlier data (examples: High drug crime rate for area, if LLM knows opiod crisis is bad in region add note.  If demographics espeically young, and you know it's a college town, note that.)  
 - always state the name of the location, like city, town, and county.
 - always state the property information such as median home price and renter percentage if possible.
 - always include demographic information if available
@@ -24,11 +24,12 @@ Write a few short sentences suitable for text-to-speech. Rules:
 - Do not do your own math -- use the numbers and percentages already computed in the JSON (e.g. renter_pct, vs_state_pct, margin_pct) rather than calculating your own from raw counts.
 - Prefer what's genuinely notable (an unusual age skew, a big gap vs. state/national/home, a distinctive economic pattern) over reciting every field in order.
 - Round numbers the way a person would say them aloud ("about sixty thousand dollars", not "59,987.42").
-- Conversational spoken tone but concise. No bullet points, no headers, no markdown.
+- Concise robotic tone. not conversational or breezy. No bullet points, no headers, no markdown. Just reading stats and data
 - If home-comparison data is present, you may reference it, but don't force it if nothing about it is actually interesting.
 - if there is something notable about the data and the location that you know, like the high drug crime rate maps to known info about opiod addiction in the region, mention it breifly
 - for politics, call republican red or deep red, and democrat blue or deep blue in addition to the lean percentage
 - If a field is null/missing/None, don't mention it -- don't say "data is unavailable," just skip it.
+- If school data (schools/enrollment/pupil_teacher_ratio/free_reduced_lunch_pct) is present, describe it only as characteristics -- never call a school "good" or "bad," never imply a quality rating or ranking, and never infer quality from free_reduced_lunch_pct (a poverty indicator, not a performance measure). No school-quality data exists in this JSON; do not invent an impression of one.
 """
 
 
@@ -68,6 +69,18 @@ CATEGORY_INFO = {
         "description": "how this place compares to your home location",
         "example": "compare this to home",
     },
+    "hazards": {
+        "description": "natural hazard risk -- flooding, wildfire, earthquake, hurricane, tornado, and other disaster risk",
+        "example": "is this area at risk of flooding",
+    },
+    "schools": {
+        "description": "nearby public school characteristics -- enrollment, staffing ratio, poverty indicators (not quality ratings, which don't exist in this data)",
+        "example": "are there schools nearby",
+    },
+    "walkability": {
+        "description": "how walkable the area is, plus residential/employment density and transit access",
+        "example": "how walkable is this area",
+    },
     "everything": {
         "description": "a full, longer rundown covering every category above",
         "example": "tell me everything about this place",
@@ -95,16 +108,12 @@ INTENT_SYSTEM_PROMPT = _build_intent_prompt()
 
 
 def help_text() -> str:
-    """Deterministic (not LLM-generated) spoken description of what
-    utterances this API understands -- built from CATEGORY_INFO, so it can
-    never describe a category classify_intent doesn't actually support."""
-    examples = "; ".join(f'"{info["example"]}" for {name}' for name, info in CATEGORY_INFO.items())
-    return (
-        "You can ask about this location's demographics, housing, crime, elections, or history, "
-        "or ask to compare it to your home, or ask for everything. "
-        f"For example, you could say: {examples}. "
-        "You can also just ask a general question like \"what's around here\" and get a full rundown."
-    )
+    """Deterministic (not LLM-generated), concise keyword-style listing of
+    what this API understands -- built from CATEGORY_INFO's keys, so it
+    can never list a category classify_intent doesn't actually support and
+    never goes stale when a category is added. Deliberately terse (a
+    keyword list, not full example sentences) since it's read aloud."""
+    return "Topics: " + ", ".join(CATEGORY_INFO) + "."
 
 
 def _get_client() -> OpenAI:

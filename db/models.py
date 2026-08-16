@@ -13,9 +13,10 @@ class Geography(Base):
     __tablename__ = "geographies"
 
     geoid = Column(String, primary_key=True)
-    geo_type = Column(String, primary_key=True)  # 'county' | 'tract' | 'place'
+    geo_type = Column(String, primary_key=True)  # 'county' | 'tract' | 'place' | 'bg'
     name = Column(String)
     state_fips = Column(String(2))
+    aland_sq_m = Column(Float)  # TIGER's ALAND -- land area, sq meters, water excluded
     geometry = Column(Geometry(geometry_type="GEOMETRY", srid=4326))
 
 
@@ -49,6 +50,12 @@ class Demographic(Base):
     units_50_plus = Column(Integer)
     units_mobile_home = Column(Integer)
     median_year_built = Column(Integer)
+    # Educational attainment, ACS table B15003, population 25+.
+    population_25_plus = Column(Integer)
+    bachelors_degree = Column(Integer)
+    masters_degree = Column(Integer)
+    professional_degree = Column(Integer)
+    doctorate_degree = Column(Integer)
 
 
 class HomeValue(Base):
@@ -139,6 +146,95 @@ class HistoricSite(Base):
     state = Column(String)
     listed_date = Column(String)
     geometry = Column(Geometry(geometry_type="GEOMETRY", srid=4326))
+
+
+class NaturalHazardRisk(Base):
+    """FEMA National Risk Index, tract level. No `year` column, unlike
+    crime/elections -- NRI ships as a single current snapshot per release
+    (currently v1.20, Dec 2025), not an annual series; a full reload just
+    replaces the prior snapshot. Source is a manual download (see
+    ingestion/download_fema_nri.py -- FEMA's site blocks every scripted
+    fetch attempted during development, same situation as FBI crime data).
+
+    Column names below are a best-effort draft against NRI's documented
+    naming convention -- NOT verified against a real downloaded CSV header
+    (see download_fema_nri.py's docstring). Confirm/correct in
+    db/load.py's load_hazard_risk() once a real file exists before
+    trusting this table's contents."""
+
+    __tablename__ = "natural_hazard_risk"
+
+    geoid = Column(String, primary_key=True)  # tract GEOID
+    risk_score = Column(Float)
+    risk_rating = Column(String)
+    eal_score = Column(Float)  # Expected Annual Loss, composite
+    social_vulnerability_score = Column(Float)
+    community_resilience_score = Column(Float)
+    # Per-hazard risk scores -- all 18 NRI hazard types, confirmed by name
+    # (not necessarily by exact column-name mapping) via FEMA/OpenFEMA docs.
+    avalanche_risk_score = Column(Float)
+    coastal_flooding_risk_score = Column(Float)
+    cold_wave_risk_score = Column(Float)
+    drought_risk_score = Column(Float)
+    earthquake_risk_score = Column(Float)
+    hail_risk_score = Column(Float)
+    heat_wave_risk_score = Column(Float)
+    hurricane_risk_score = Column(Float)
+    ice_storm_risk_score = Column(Float)
+    inland_flooding_risk_score = Column(Float)
+    landslide_risk_score = Column(Float)
+    lightning_risk_score = Column(Float)
+    strong_wind_risk_score = Column(Float)
+    tornado_risk_score = Column(Float)
+    tsunami_risk_score = Column(Float)
+    volcanic_activity_risk_score = Column(Float)
+    wildfire_risk_score = Column(Float)
+    winter_weather_risk_score = Column(Float)
+
+
+class School(Base):
+    """NCES CCD public school characteristics -- location, enrollment,
+    staffing, free/reduced-lunch eligibility. This is a POVERTY PROXY, NOT
+    a quality/rating metric -- no free nationwide school-quality data
+    exists (GreatSchools-style ratings are a proprietary product, checked
+    during research and rejected for that reason). Point geometry, queried
+    by proximity like historic_sites, not GEOID-keyed."""
+
+    __tablename__ = "schools"
+
+    id = Column(String, primary_key=True)  # NCES NCESSCH id
+    name = Column(String)
+    school_type = Column(String)
+    city = Column(String)
+    state = Column(String)
+    enrollment = Column(Integer)
+    pupil_teacher_ratio = Column(Float)
+    free_reduced_lunch_pct = Column(Float)  # poverty proxy, not a quality signal
+    locale = Column(String)
+    geometry = Column(Geometry(geometry_type="POINT", srid=4326))
+
+
+class BuiltEnvironment(Base):
+    """EPA Smart Location Database, block-group level -- walkability plus
+    the underlying density/transit measures it's derived from. A curated
+    subset of SLD's 90+ variables, not a raw dump (same "sensible subset"
+    approach as NaturalHazardRisk's hazard scores).
+
+    Keyed by a 12-digit block group GEOID reconstructed from SLD's
+    STATEFP/COUNTYFP/TRACTCE/BLKGRPCE columns (2019/2020-vintage,
+    matching this app's current-vintage TIGER `bg` geographies) -- NOT
+    from SLD's own GEOID10/GEOID20 columns, which are confirmed corrupted
+    into scientific notation in the source CSV itself. See db/load.py's
+    load_built_environment() for details."""
+
+    __tablename__ = "built_environment"
+
+    geoid = Column(String, primary_key=True)  # 12-digit block group GEOID (SLD's GEOID20)
+    walkability_index = Column(Float)  # SLD's NatWalkInd
+    residential_density = Column(Float)  # SLD's D1A, housing units/acre
+    employment_density = Column(Float)  # SLD's D1C, jobs/acre
+    intersection_density = Column(Float)
+    transit_frequency = Column(Float)
 
 
 class HistoryCache(Base):

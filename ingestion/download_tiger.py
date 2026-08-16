@@ -17,8 +17,8 @@ def main():
     print("county (nationwide, 1 file)")
     download(f"{BASE}/COUNTY/tl_{TIGER_YEAR}_us_county.zip", OUT / "county" / f"tl_{TIGER_YEAR}_us_county.zip")
 
-    # Tract and place: one file per state/territory.
-    for geo in ("tract", "place"):
+    # Tract, place, and block group: one file per state/territory.
+    for geo in ("tract", "place", "bg"):
         print(f"{geo} (per state, {len(STATE_FIPS)} files)")
         for fips in STATE_FIPS:
             url = f"{BASE}/{geo.upper()}/tl_{TIGER_YEAR}_{fips}_{geo}.zip"

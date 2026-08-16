@@ -15,12 +15,15 @@ from api.llm import CATEGORY_INFO, classify_intent, generate_commentary, help_te
 from api.wikipedia import get_history_events, get_history_people, get_history_summary
 from db.queries import (
     compare_to_home,
+    get_built_environment,
     get_crime,
     get_crime_rate,
     get_demographics,
     get_elections,
+    get_hazard_risk,
     get_historic_sites,
     get_home_values,
+    get_nearby_schools,
     get_neighborhood_summary,
     resolve_location,
 )
@@ -65,6 +68,9 @@ CATEGORY_BUILDERS = {
         **get_history_summary(lat, lon),
     },
     "compare": lambda loc, lat, lon, home_zip: {"compare": compare_to_home(lat, lon, home_zip)},
+    "hazards": lambda loc, lat, lon, home_zip: {"hazards": get_hazard_risk(loc["tract_geoid"])},
+    "schools": lambda loc, lat, lon, home_zip: {"schools": get_nearby_schools(lat, lon)},
+    "walkability": lambda loc, lat, lon, home_zip: {"built_environment": get_built_environment(loc["block_group_geoid"])},
 }
 
 
@@ -177,6 +183,27 @@ def history_events(lat: float = Query(...), lon: float = Query(...), commentary:
 def history_people(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
     loc = _location_or_404(lat, lon)
     data = {"location": loc, "people": get_history_people(lat, lon)}
+    return _respond(data, commentary)
+
+
+@app.get("/neighborhood/hazards", dependencies=[Depends(require_api_key)])
+def hazards(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
+    loc = _location_or_404(lat, lon)
+    data = {"location": loc, "hazards": get_hazard_risk(loc["tract_geoid"])}
+    return _respond(data, commentary)
+
+
+@app.get("/neighborhood/schools", dependencies=[Depends(require_api_key)])
+def schools(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
+    loc = _location_or_404(lat, lon)
+    data = {"location": loc, "schools": get_nearby_schools(lat, lon)}
+    return _respond(data, commentary)
+
+
+@app.get("/neighborhood/walkability", dependencies=[Depends(require_api_key)])
+def walkability(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
+    loc = _location_or_404(lat, lon)
+    data = {"location": loc, "built_environment": get_built_environment(loc["block_group_geoid"])}
     return _respond(data, commentary)
 
 

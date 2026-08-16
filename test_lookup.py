@@ -48,6 +48,10 @@ def print_summary(lat, lon):
         print(f"  Median year built: {demo['median_year_built']}")
         if demo.get("renter_pct") is not None:
             print(f"  Renter-occupied: {demo['renter_pct']}%")
+        if demo.get("population_density") is not None:
+            print(f"  Population density: {demo['population_density']:,.0f} people/sq mi")
+        if demo.get("bachelors_or_higher_pct") is not None:
+            print(f"  Bachelor's degree or higher: {demo['bachelors_or_higher_pct']}%")
     else:
         print("\nDemographics: no data")
 
@@ -93,6 +97,32 @@ def print_summary(lat, lon):
             print(f"  {s['name']} ({s['site_type']}, {s['distance_m']}m away)")
     else:
         print("\nHistoric sites: none within 5km")
+
+    hazards = summary.get("hazards")
+    if hazards:
+        print(f"\nNatural hazard risk (FEMA NRI): {hazards.get('risk_rating')} (score {hazards.get('risk_score')})")
+        for h in hazards.get("top_hazards", [])[:5]:
+            print(f"  {h['hazard']}: {h['risk_score']}")
+    else:
+        print("\nNatural hazard risk: no data (FEMA NRI not loaded -- see ingestion/download_fema_nri.py)")
+
+    schools = summary.get("schools")
+    if schools:
+        print(f"\nNearby public schools within 3km:")
+        for s in schools:
+            lunch = f", {s['free_reduced_lunch_pct']}% free/reduced lunch" if s.get("free_reduced_lunch_pct") is not None else ""
+            print(f"  {s['name']} ({s['school_type']}, {s['distance_m']}m away, {s['enrollment']} students{lunch})")
+    else:
+        print("\nNearby public schools: none within 3km")
+
+    built_env = summary.get("built_environment")
+    if built_env:
+        print(f"\nBuilt environment (EPA Smart Location Database, block group):")
+        print(f"  Walkability index: {built_env.get('walkability_index')}")
+        print(f"  Residential density: {built_env.get('residential_density')} housing units/acre")
+        print(f"  Employment density: {built_env.get('employment_density')} jobs/acre")
+    else:
+        print("\nBuilt environment: no data")
 
     vs_home = compare_to_home(lat, lon, HOME_ZIP)
     if vs_home:

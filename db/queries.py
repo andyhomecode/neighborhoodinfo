@@ -179,6 +179,19 @@ def resolve_location(lat: float, lon: float) -> dict | None:
             {"lat": lat, "lon": lon},
         ).fetchone()
 
+        # Block group -- one level finer than tract, needed for EPA SLD
+        # (get_built_environment). Point-in-polygon like tract/place, not a
+        # string-slice of the tract GEOID -- block group numbering isn't a
+        # simple suffix of the tract the way county is a prefix.
+        block_group = conn.execute(
+            text(
+                "SELECT geoid, name FROM geographies "
+                "WHERE geo_type = 'bg' AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)) "
+                "LIMIT 1"
+            ),
+            {"lat": lat, "lon": lon},
+        ).fetchone()
+
     return {
         "tract_geoid": tract.geoid,
         "tract_name": tract.name,
@@ -186,14 +199,23 @@ def resolve_location(lat: float, lon: float) -> dict | None:
         "county_name": county.name if county else None,
         "place_geoid": place.geoid if place else None,
         "place_name": place.name if place else None,
+        "block_group_geoid": block_group.geoid if block_group else None,
+        "block_group_name": block_group.name if block_group else None,
         "state_fips": tract.state_fips,
     }
+
+
+SQ_METERS_PER_SQ_MILE = 2_589_988.11
 
 
 def get_demographics(tract_geoid: str) -> dict | None:
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT * FROM demographics WHERE geoid = :geoid ORDER BY year DESC LIMIT 1"),
+            text(
+                "SELECT d.*, g.aland_sq_m FROM demographics d "
+                "LEFT JOIN geographies g ON g.geoid = d.geoid AND g.geo_type = 'tract' "
+                "WHERE d.geoid = :geoid ORDER BY d.year DESC LIMIT 1"
+            ),
             {"geoid": tract_geoid},
         ).mappings().fetchone()
     if row is None:
@@ -201,6 +223,14 @@ def get_demographics(tract_geoid: str) -> dict | None:
     d = dict(row)
     if d.get("occupied_housing_units"):
         d["renter_pct"] = round(100 * d["renter_occupied_units"] / d["occupied_housing_units"], 1)
+    if d.get("total_population") and d.get("aland_sq_m"):
+        land_sq_mi = d["aland_sq_m"] / SQ_METERS_PER_SQ_MILE
+        d["population_density"] = round(d["total_population"] / land_sq_mi, 1) if land_sq_mi else None
+    if d.get("population_25_plus"):
+        higher_ed = sum(
+            d.get(k) or 0 for k in ("bachelors_degree", "masters_degree", "professional_degree", "doctorate_degree")
+        )
+        d["bachelors_or_higher_pct"] = round(100 * higher_ed / d["population_25_plus"], 1)
     return d
 
 
@@ -509,6 +539,88 @@ def get_historic_sites(lat: float, lon: float, radius_m: int = 5000, limit: int 
     return [{**dict(r), "distance_m": round(r["distance_m"])} for r in rows]
 
 
+# Human-readable labels for FEMA NRI's per-hazard score fields -- used by
+# get_hazard_risk to build a "top hazards" list, the same way OFFENSE_LABELS
+# turns crime's raw codes into narratable text.
+HAZARD_LABELS = {
+    "avalanche_risk_score": "avalanche",
+    "coastal_flooding_risk_score": "coastal flooding",
+    "cold_wave_risk_score": "cold wave",
+    "drought_risk_score": "drought",
+    "earthquake_risk_score": "earthquake",
+    "hail_risk_score": "hail",
+    "heat_wave_risk_score": "heat wave",
+    "hurricane_risk_score": "hurricane",
+    "ice_storm_risk_score": "ice storm",
+    "inland_flooding_risk_score": "inland flooding",
+    "landslide_risk_score": "landslide",
+    "lightning_risk_score": "lightning",
+    "strong_wind_risk_score": "strong wind",
+    "tornado_risk_score": "tornado",
+    "tsunami_risk_score": "tsunami",
+    "volcanic_activity_risk_score": "volcanic activity",
+    "wildfire_risk_score": "wildfire",
+    "winter_weather_risk_score": "winter weather",
+}
+
+
+def get_hazard_risk(tract_geoid: str) -> dict | None:
+    """FEMA National Risk Index for this tract. `None` unless
+    ingestion/download_fema_nri.py's manually-downloaded file has been
+    loaded (see db/load.py's load_hazard_risk() -- NRI's site blocks
+    scripted downloads, same situation as FBI crime data)."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT * FROM natural_hazard_risk WHERE geoid = :geoid"),
+            {"geoid": tract_geoid},
+        ).mappings().fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    top_hazards = sorted(
+        ((HAZARD_LABELS[k], d[k]) for k in HAZARD_LABELS if d.get(k) is not None),
+        key=lambda kv: -kv[1],
+    )
+    d["top_hazards"] = [{"hazard": label, "risk_score": score} for label, score in top_hazards[:5]]
+    return d
+
+
+def get_nearby_schools(lat: float, lon: float, radius_m: int = 3000, limit: int = 5) -> list[dict]:
+    """Nearby public schools -- characteristics only (enrollment, staffing
+    ratio, free/reduced-lunch rate as a poverty proxy), NOT a quality
+    rating. See db/models.py's School docstring for why no rating field
+    exists. Smaller default radius than get_historic_sites -- schools are
+    denser than historic sites in populated areas."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT name, school_type, city, enrollment, pupil_teacher_ratio, free_reduced_lunch_pct, locale, "
+                "ST_Distance(geometry::geography, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography) AS distance_m "
+                "FROM schools "
+                "WHERE ST_DWithin(geometry::geography, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography, :radius) "
+                "ORDER BY distance_m LIMIT :limit"
+            ),
+            {"lat": lat, "lon": lon, "radius": radius_m, "limit": limit},
+        ).mappings().fetchall()
+    return [{**dict(r), "distance_m": round(r["distance_m"])} for r in rows]
+
+
+def get_built_environment(block_group_geoid: str | None) -> dict | None:
+    """EPA Smart Location Database for this block group -- walkability,
+    residential/employment density, intersection density, transit
+    frequency. `None` if block_group_geoid is None (e.g. resolve_location
+    found no containing block group) or the block group isn't in the
+    loaded SLD data."""
+    if block_group_geoid is None:
+        return None
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT * FROM built_environment WHERE geoid = :geoid"),
+            {"geoid": block_group_geoid},
+        ).mappings().fetchone()
+    return dict(row) if row else None
+
+
 def get_neighborhood_summary(lat: float, lon: float) -> dict:
     location = resolve_location(lat, lon)
     if location is None:
@@ -522,6 +634,9 @@ def get_neighborhood_summary(lat: float, lon: float) -> dict:
         "crime_rate": get_crime_rate(location["county_geoid"]),
         "elections": get_elections(location["county_geoid"]),
         "historic_sites": get_historic_sites(lat, lon),
+        "hazards": get_hazard_risk(location["tract_geoid"]),
+        "schools": get_nearby_schools(lat, lon),
+        "built_environment": get_built_environment(location["block_group_geoid"]),
     }
 
 

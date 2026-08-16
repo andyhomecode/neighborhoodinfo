@@ -13,6 +13,7 @@ from sqlalchemy import text
 from db.engine import engine
 from db.models import (
     Base,
+    BuiltEnvironment,
     Crime,
     Demographic,
     Election,
@@ -20,6 +21,8 @@ from db.models import (
     HistoricSite,
     HomeValue,
     LocalCrimeSupplement,
+    NaturalHazardRisk,
+    School,
     ZipCentroid,
 )
 
@@ -36,6 +39,9 @@ BATCH_TABLES = [
     LocalCrimeSupplement.__table__,
     ZipCentroid.__table__,
     HistoricSite.__table__,
+    NaturalHazardRisk.__table__,
+    School.__table__,
+    BuiltEnvironment.__table__,
 ]
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -79,6 +85,11 @@ ACS_COLUMNS = {
     "B25024_009E": "units_50_plus",
     "B25024_010E": "units_mobile_home",
     "B25035_001E": "median_year_built",
+    "B15003_001E": "population_25_plus",
+    "B15003_022E": "bachelors_degree",
+    "B15003_023E": "masters_degree",
+    "B15003_024E": "professional_degree",
+    "B15003_025E": "doctorate_degree",
 }
 
 
@@ -86,21 +97,21 @@ def load_geographies():
     print("geographies: county")
     gdf = gpd.read_file(f"zip://{DATASETS}/tiger/county/tl_2025_us_county.zip")
     gdf = gdf.to_crs(4326)
-    out = gdf[["GEOID", "NAMELSAD", "STATEFP", "geometry"]].rename(
-        columns={"GEOID": "geoid", "NAMELSAD": "name", "STATEFP": "state_fips"}
+    out = gdf[["GEOID", "NAMELSAD", "STATEFP", "ALAND", "geometry"]].rename(
+        columns={"GEOID": "geoid", "NAMELSAD": "name", "STATEFP": "state_fips", "ALAND": "aland_sq_m"}
     )
     out["geo_type"] = "county"
     out.to_postgis("geographies", engine, if_exists="append", index=False)
 
-    for geo_type in ("tract", "place"):
+    for geo_type in ("tract", "place", "bg"):
         for fips in STATE_FIPS:
             path = DATASETS / "tiger" / geo_type / f"tl_2025_{fips}_{geo_type}.zip"
             if not path.exists():
                 continue
             gdf = gpd.read_file(f"zip://{path}")
             gdf = gdf.to_crs(4326)
-            out = gdf[["GEOID", "NAMELSAD", "STATEFP", "geometry"]].rename(
-                columns={"GEOID": "geoid", "NAMELSAD": "name", "STATEFP": "state_fips"}
+            out = gdf[["GEOID", "NAMELSAD", "STATEFP", "ALAND", "geometry"]].rename(
+                columns={"GEOID": "geoid", "NAMELSAD": "name", "STATEFP": "state_fips", "ALAND": "aland_sq_m"}
             )
             out["geo_type"] = geo_type
             out.to_postgis("geographies", engine, if_exists="append", index=False)
@@ -254,6 +265,176 @@ def load_historic_sites():
     print(f"historic_sites: {len(out):,} sites")
 
 
+# FEMA NRI tract-level CSV column names -> this table's snake_case columns.
+# Best-effort draft against NRI's documented naming convention (4-letter
+# hazard codes + "_RISKS" suffix) -- NOT verified against a real downloaded
+# header (see ingestion/download_fema_nri.py's docstring for why: every
+# automated fetch attempt was blocked). load_hazard_risk() loads whatever
+# subset of these actually matches the real file and prints the rest as
+# unmatched, rather than crashing on a wrong guess -- fix this mapping once
+# a real file's header is visible.
+NRI_COLUMN_MAP = {
+    "TRACTFIPS": "geoid",
+    "RISK_SCORE": "risk_score",
+    "RISK_RATNG": "risk_rating",
+    "EAL_SCORE": "eal_score",
+    "SOVI_SCORE": "social_vulnerability_score",
+    "RESL_SCORE": "community_resilience_score",
+    "AVLN_RISKS": "avalanche_risk_score",
+    "CFLD_RISKS": "coastal_flooding_risk_score",
+    "CWAV_RISKS": "cold_wave_risk_score",
+    "DRGT_RISKS": "drought_risk_score",
+    "ERQK_RISKS": "earthquake_risk_score",
+    "HAIL_RISKS": "hail_risk_score",
+    "HWAV_RISKS": "heat_wave_risk_score",
+    "HRCN_RISKS": "hurricane_risk_score",
+    "ISTM_RISKS": "ice_storm_risk_score",
+    "RFLD_RISKS": "inland_flooding_risk_score",
+    "LNDS_RISKS": "landslide_risk_score",
+    "LTNG_RISKS": "lightning_risk_score",
+    "SWND_RISKS": "strong_wind_risk_score",
+    "TRND_RISKS": "tornado_risk_score",
+    "TSUN_RISKS": "tsunami_risk_score",
+    "VLCN_RISKS": "volcanic_activity_risk_score",
+    "WFIR_RISKS": "wildfire_risk_score",
+    "WNTW_RISKS": "winter_weather_risk_score",
+}
+
+
+def load_hazard_risk():
+    print("natural_hazard_risk")
+    paths = list((DATASETS / "fema_nri").glob("*.csv")) if (DATASETS / "fema_nri").exists() else []
+    if not paths:
+        print("  none found, skipping (run ingestion/download_fema_nri.py for manual-download steps)")
+        return
+    frames = []
+    for path in paths:
+        df = pd.read_csv(path, low_memory=False)
+        found = {src: dst for src, dst in NRI_COLUMN_MAP.items() if src in df.columns}
+        missing = [src for src in NRI_COLUMN_MAP if src not in df.columns]
+        if missing:
+            print(f"  {path.name}: {len(missing)} expected column(s) not found (mapping needs fixing): {missing}")
+        if "geoid" not in found.values():
+            print(f"  {path.name}: no GEOID column found, skipping this file")
+            continue
+        out = df[list(found)].rename(columns=found)
+        out["geoid"] = out["geoid"].astype(str).str.zfill(11)
+        frames.append(out)
+    if not frames:
+        print("  no usable rows across matched files, skipping")
+        return
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset="geoid")
+    combined.to_sql("natural_hazard_risk", engine, if_exists="append", index=False, chunksize=5000, method="multi")
+    print(f"natural_hazard_risk: {len(combined):,} tracts")
+
+
+# NCES's own missing/not-applicable sentinel (confirmed live: -1/-2/etc. on
+# TOTAL, TOTFRL, STUTERATIO for a real chunk of schools -- grade-level
+# counts especially, since not every school reports every field).
+def _nces_val(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 0 else None
+
+
+def load_schools():
+    print("schools")
+    path = DATASETS / "nces_ccd" / "schools.csv"
+    if not path.exists():
+        print("  none found, skipping (run ingestion/download_nces_ccd.py first)")
+        return
+    df = pd.read_csv(
+        path,
+        usecols=[
+            "NCESSCH", "SCH_NAME", "SCHOOL_TYPE_TEXT", "LCITY", "LSTATE",
+            "TOTAL", "STUTERATIO", "TOTFRL", "ULOCALE", "SY_STATUS_TEXT", "LATCOD", "LONCOD",
+        ],
+    )
+    df = df[df["SY_STATUS_TEXT"] == "Open"]  # exclude closed/future/inactive listings
+    rows = []
+    for _, r in df.iterrows():
+        total = _nces_val(r["TOTAL"])
+        totfrl = _nces_val(r["TOTFRL"])
+        rows.append(
+            {
+                "id": str(r["NCESSCH"]),
+                "name": r["SCH_NAME"],
+                "school_type": r["SCHOOL_TYPE_TEXT"],
+                "city": r["LCITY"],
+                "state": r["LSTATE"].strip() if isinstance(r["LSTATE"], str) else r["LSTATE"],
+                "enrollment": int(total) if total is not None else None,
+                "pupil_teacher_ratio": _nces_val(r["STUTERATIO"]),
+                "free_reduced_lunch_pct": round(100 * totfrl / total, 1) if total and totfrl is not None else None,
+                "locale": r["ULOCALE"],
+                "lat": r["LATCOD"],
+                "lon": r["LONCOD"],
+            }
+        )
+    out = pd.DataFrame(rows)
+    # Nullable pandas Int64 (capital I), not plain int -- `enrollment` has
+    # real Nones mixed in (schools with a missing/sentinel TOTAL), which
+    # upcasts a plain int column to float64 (849 -> 849.0). to_postgis uses
+    # Postgres COPY under the hood, which -- unlike a normal INSERT -- does
+    # NOT tolerate a float value going into an integer column; confirmed
+    # live via a real `invalid input syntax for type integer: "849.0"`
+    # error before this fix.
+    out["enrollment"] = out["enrollment"].astype("Int64")
+    gdf = gpd.GeoDataFrame(
+        out.drop(columns=["lat", "lon"]),
+        geometry=gpd.points_from_xy(out["lon"], out["lat"]),
+        crs=4326,
+    )
+    gdf.to_postgis("schools", engine, if_exists="append", index=False)
+    print(f"schools: {len(gdf):,} open public schools")
+
+
+def load_built_environment():
+    print("built_environment")
+    path = DATASETS / "epa_sld" / "sld.csv"
+    if not path.exists():
+        print("  none found, skipping (run ingestion/download_epa_sld.py first)")
+        return
+    # NOT using the file's own GEOID10/GEOID20 columns -- confirmed live that
+    # they're pre-corrupted into scientific notation (e.g. "4.8113E+11") in
+    # the source CSV itself, a real precision loss baked in before this
+    # script ever touches it. Reconstructing from the separate, clean
+    # STATEFP/COUNTYFP/TRACTCE/BLKGRPCE integer columns instead sidesteps
+    # that entirely. Assumption (not fully verified): these decomposed
+    # columns correspond to the GEOID20 (current-vintage) geography SLD v3
+    # is primarily built on, not the legacy GEOID10 -- matches this app's
+    # current-vintage TIGER `bg` geographies. Re-check if block-group joins
+    # in `built_environment` come back suspiciously empty.
+    df = pd.read_csv(
+        path,
+        low_memory=False,
+        dtype={"STATEFP": str, "COUNTYFP": str, "TRACTCE": str, "BLKGRPCE": str},
+        usecols=["STATEFP", "COUNTYFP", "TRACTCE", "BLKGRPCE", "NatWalkInd", "D1A", "D1C", "D3B", "D4C"],
+    )
+    df["geoid"] = (
+        df["STATEFP"].str.zfill(2) + df["COUNTYFP"].str.zfill(3) + df["TRACTCE"].str.zfill(6) + df["BLKGRPCE"]
+    )
+    out = df.rename(
+        columns={
+            "NatWalkInd": "walkability_index",
+            "D1A": "residential_density",
+            "D1C": "employment_density",
+            "D3B": "intersection_density",
+            "D4C": "transit_frequency",
+        }
+    )[["geoid", "walkability_index", "residential_density", "employment_density", "intersection_density", "transit_frequency"]]
+    # SLD's -99999 sentinel for "no transit service in this block group" --
+    # confirmed live: 119,319 of 220,740 rows (54%) use it on D4C
+    # specifically (no other column here has any negative values at all).
+    # Real "no transit" for a rural/small-town block group, not a data
+    # error -- coerce to None rather than showing a nonsense negative rate.
+    out.loc[out["transit_frequency"] < 0, "transit_frequency"] = None
+    out = out.drop_duplicates(subset="geoid")
+    out.to_sql("built_environment", engine, if_exists="append", index=False, chunksize=5000, method="multi")
+    print(f"built_environment: {len(out):,} block groups")
+
+
 def main():
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
@@ -270,12 +451,16 @@ def main():
     load_zip_centroids()
     load_local_crime_supplement()
     load_historic_sites()
+    load_hazard_risk()
+    load_schools()
+    load_built_environment()
 
     with engine.connect() as conn:
         # Plain-geometry GIST indexes: used by ST_Contains point-in-polygon
         # lookups (resolve_location), which query in degrees/SRID 4326 directly.
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_geographies_geom ON geographies USING GIST (geometry)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_historic_sites_geom ON historic_sites USING GIST (geometry)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_schools_geom ON schools USING GIST (geometry)"))
         # Geography-cast GIST indexes: used by ST_DWithin/ST_Distance queries
         # (get_historic_sites, any radius search), which cast to ::geography
         # for accurate meter-based distance. A plain-geometry index does NOT
@@ -285,6 +470,7 @@ def main():
         # whichever query style doesn't match falls back to a full scan.
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_geographies_geom_geog ON geographies USING GIST ((geometry::geography))"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_historic_sites_geom_geog ON historic_sites USING GIST ((geometry::geography))"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_schools_geom_geog ON schools USING GIST ((geometry::geography))"))
         conn.commit()
     print("done, spatial indexes built")
 
