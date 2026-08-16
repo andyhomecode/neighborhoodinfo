@@ -1,0 +1,9 @@
+requests>=2.31
+python-dotenv>=1.0
+geopandas>=0.14
+shapely>=2.0
+pyogrio>=0.7
+sqlalchemy>=2.0
+geoalchemy2>=0.14
+psycopg2-binary>=2.9
+pandas>=2.0

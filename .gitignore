@@ -1,0 +1,7 @@
+datasets/
+ingestion/.venv/
+ingestion/.env
+.env
+api/.venv/
+__pycache__/
+*.pyc
