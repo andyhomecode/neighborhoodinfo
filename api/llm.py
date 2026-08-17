@@ -59,6 +59,26 @@ Rules:
 - Round numbers the way a person would say them aloud.
 - State only facts directly present in the JSON. Never invent a number."""
 
+# A deliberately different style again -- not narration, not a stat list,
+# a single blunt one-liner. Used only for the "vibe" category.
+VIBE_SYSTEM_PROMPT = """You are giving a single blunt, snarky one-sentence "vibe check" of a place for a voice assistant to read aloud while driving.
+
+You will be given structured JSON covering demographics, home values, crime, elections, hazards, walkability, and schools where present.
+
+Match this exact form -- a comma-separated string of short blunt descriptors capping off in a punchy closing label, followed by the median home price as a second short clause:
+
+"Rich, expensive, white, liberal college town. Houses around $780,000."
+"Poor, tornado-prone, mixed-race, deep-red middle of nowhere. Houses around $95,000."
+
+Rules:
+- Exactly TWO sentences: the descriptor label, then the home price. Never a narrated paragraph, never more than those two sentences.
+- Every descriptor must be grounded in a real field in the JSON: income/home value -> rich/poor/expensive/cheap, race percentages -> white/black/hispanic/diverse/mixed-race, political lean -> deep-red/red/purple/blue/deep-blue, median age -> college town/retirement community/young/aging, hazard data -> tornado-prone/flood-prone/wildfire-prone/earthquake-prone, density/walkability -> walkable/car-dependent/rural/urban/sprawling. Never invent a descriptor not backed by a field that's actually present.
+- If `home_values.zhvi` is present in the JSON, always close with a second short sentence stating it as a rounded dollar figure the way a person would say it aloud (e.g. "Houses around $780,000." not "$779,842.17."). If `home_values` or `zhvi` is missing, drop this second sentence entirely -- don't mention that it's missing.
+- Snarky, dry, a little mean -- the blunt truth a friend would give you about a place, not a chamber-of-commerce brochure. Deadpan, not silly or cartoonish, no jokes that aren't grounded in the data.
+- Do not hedge, do not soften, do not explain your reasoning, do not apologize for being blunt -- just say the label.
+- No bullet points, no headers, no markdown, no quotation marks around the output.
+- If the JSON has nothing substantive, say so in the same dry tone in a few words (e.g. "No data on this one -- you're in the middle of nowhere, literally.")."""
+
 # Single source of truth for what `classify_intent` can return -- both
 # INTENT_SYSTEM_PROMPT and help_text() are built from this, so the model's
 # classification options and the user-facing help description can't drift
@@ -114,6 +134,10 @@ CATEGORY_INFO = {
     "compare_nyc": {
         "description": "rapid-fire stat comparison to New York City specifically",
         "example": "compare to NYC",
+    },
+    "vibe": {
+        "description": "a blunt, snarky one-sentence vibe check of the place",
+        "example": "what's the vibe here",
     },
     "everything": {
         "description": "a full, longer rundown covering every category above",
@@ -193,8 +217,9 @@ def _has_real_content(data: dict) -> bool:
 
 def generate_commentary(data: dict, style: str = "normal") -> str:
     """style: "normal" (default, a few narrated sentences), "long" (fuller
-    narration, used for "everything"), or "rapid_fire" (short stat-by-stat
-    callouts, used for compare_state/compare_usa/compare_nyc).
+    narration, used for "everything"), "rapid_fire" (short stat-by-stat
+    callouts, used for compare_state/compare_usa/compare_nyc), or "vibe"
+    (a single blunt, snarky one-liner, used for the "vibe" category).
 
     Skips the DeepSeek call entirely (deterministic fallback string
     instead) when `data` has nothing substantive in it -- e.g. a single
@@ -214,11 +239,17 @@ def generate_commentary(data: dict, style: str = "normal") -> str:
 
     client = _get_client()
     if style == "long":
-        system_prompt, max_tokens = SYSTEM_PROMPT + LONG_ADDENDUM, 900
+        system_prompt, max_tokens, temperature = SYSTEM_PROMPT + LONG_ADDENDUM, 900, 0.7
     elif style == "rapid_fire":
-        system_prompt, max_tokens = RAPID_FIRE_SYSTEM_PROMPT, 600
+        system_prompt, max_tokens, temperature = RAPID_FIRE_SYSTEM_PROMPT, 600, 0.7
+    elif style == "vibe":
+        # Higher temperature than the other styles -- this one is supposed
+        # to read as a sharp, opinionated one-liner, not a hedge-y average
+        # of possible phrasings. Low max_tokens keeps it from rambling past
+        # the two-sentence rule even if the model tries to.
+        system_prompt, max_tokens, temperature = VIBE_SYSTEM_PROMPT, 80, 0.9
     else:
-        system_prompt, max_tokens = SYSTEM_PROMPT, 300
+        system_prompt, max_tokens, temperature = SYSTEM_PROMPT, 300, 0.7
     resp = client.chat.completions.create(
         model="deepseek-chat",
         messages=[
@@ -226,6 +257,6 @@ def generate_commentary(data: dict, style: str = "normal") -> str:
             {"role": "user", "content": json.dumps(data, default=str)},
         ],
         max_tokens=max_tokens,
-        temperature=0.7,
+        temperature=temperature,
     )
     return resp.choices[0].message.content.strip()

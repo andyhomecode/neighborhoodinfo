@@ -79,11 +79,22 @@ CATEGORY_BUILDERS = {
     # not whatever the caller's configured default home is. `compare` (the
     # existing category) is the one that respects `home_zip`.
     "compare_nyc": lambda loc, lat, lon, home_zip: {"compare_nyc": compare_to_home(lat, lon, "10002")},
+    # Reuses the same full-picture data "everything" builds inline below --
+    # the snarky one-liner needs the whole picture (demographics, home
+    # values, crime, elections, hazards, walkability, schools) to have
+    # enough grounded material to draw descriptors from.
+    "vibe": lambda loc, lat, lon, home_zip: {
+        k: v for k, v in get_neighborhood_summary(lat, lon).items() if k != "location"
+    },
 }
 
 # Categories whose commentary should use the rapid-fire stat-callout style
 # (see api/llm.py's RAPID_FIRE_SYSTEM_PROMPT) instead of narrated prose.
 RAPID_FIRE_CATEGORIES = {"compare_state", "compare_usa", "compare_nyc"}
+
+# Categories whose commentary should use the single-line snarky "vibe check"
+# style (see api/llm.py's VIBE_SYSTEM_PROMPT) instead of narrated prose.
+VIBE_CATEGORIES = {"vibe"}
 
 
 @app.get("/neighborhood", dependencies=[Depends(require_api_key)])
@@ -127,6 +138,8 @@ def neighborhood(
 
         if is_everything:
             style = "long"
+        elif VIBE_CATEGORIES & set(categories):
+            style = "vibe"
         elif RAPID_FIRE_CATEGORIES & set(categories):
             style = "rapid_fire"
         else:
@@ -224,6 +237,14 @@ def walkability(lat: float = Query(...), lon: float = Query(...), commentary: bo
     loc = _location_or_404(lat, lon)
     data = {"location": loc, "built_environment": get_built_environment(loc["block_group_geoid"])}
     return _respond(data, commentary)
+
+
+@app.get("/neighborhood/vibe", dependencies=[Depends(require_api_key)])
+def vibe(lat: float = Query(...), lon: float = Query(...), commentary: bool = Query(True)):
+    data = get_neighborhood_summary(lat, lon)
+    if data["location"] is None:
+        raise HTTPException(status_code=404, detail="location not covered (outside the US, or over water)")
+    return _respond(data, commentary, style="vibe")
 
 
 @app.get("/neighborhood/compare", dependencies=[Depends(require_api_key)])

@@ -144,22 +144,24 @@ Publicly reachable at `https://<your-domain>/neighborhoodapi/...` via an existin
 
 ## Siri Shortcut
 
-Working end to end on iPhone — a single shortcut (named "GIS") handles every category and utterance, and loops for follow-up questions without re-invoking Siri each time:
-
-<img src="Shortcut1.PNG" width="300" alt="Shortcut steps: Get current location, Ask for Text input, an If checking whether the answer is No/End/Quit/Stop, Stop this shortcut"> <img src="Shortcut2.png" width="300" alt="Otherwise branch: URL Encode the answer, build the request URL (domain redacted), Get contents of URL, Get Value for summary"> <img src="Shortcut3.PNG" width="300" alt="Continued: Speak the summary, Run GIS (itself) to loop, End If">
+Working end to end on iPhone — a single shortcut (named "GIS") opens every invocation with an unprompted "vibe check" of wherever you currently are, then handles every category and utterance, looping for follow-up questions without re-invoking Siri each time:
 
 1. **Get Current Location**
-2. **Ask for Input** (Text), prompt: *"What do you want to know?"* — when triggered via Siri, this prompts and listens by voice automatically.
-3. **If Any are true**: the answer is `"No"`, `"End"`, `"Quit"`, or `"Stop"` → **Stop This Shortcut**. This is the exit condition for the loop below.
-4. **Otherwise**:
-   1. **URL Encode** the answer from step 2 — necessary because a raw, unencoded utterance (e.g. a space in "compare to state") breaks the query string. Built as its own action rather than relying on auto-encoding, since typing the URL directly into a **Text** action (as this shortcut does, to see the full URL for debugging) does *not* auto-encode inserted variables the way inserting them straight into a `URL` action's query fields would.
+2. **Text**, building the vibe-check URL: `https://<your-domain>/neighborhoodapi/neighborhood/vibe?lat=[Latitude]&lon=[Longitude]` — no utterance/URL-encoding needed here, since `/neighborhood/vibe` doesn't take one.
+3. **Get Contents of URL**, with the `X-API-Key` header set.
+4. **Get Value** for `summary` in that response.
+5. **Speak** the vibe-check summary — e.g. *"Young, educated, crime-heavy, purple college town with a hail problem. Houses around $266,000."*
+6. **Ask for Input** (Text), prompt: *"What do you want to know?"* — when triggered via Siri, this prompts and listens by voice automatically.
+7. **If Any are true**: the answer is `"No"`, `"End"`, `"Quit"`, or `"Stop"` → **Stop This Shortcut**. This is the exit condition for the loop below.
+8. **Otherwise**:
+   1. **URL Encode** the answer from step 6 — necessary because a raw, unencoded utterance (e.g. a space in "compare to state") breaks the query string. Built as its own action rather than relying on auto-encoding, since typing the URL directly into a **Text** action (as this shortcut does, to see the full URL for debugging) does *not* auto-encode inserted variables the way inserting them straight into a `URL` action's query fields would.
    2. **Text**, building the request URL: `https://<your-domain>/neighborhoodapi/neighborhood?lat=[Latitude]&lon=[Longitude]&utterance=[URL Encoded Text]`
-   3. **Get Contents of URL**, with the `X-API-Key` header set (not visible in these screenshots — configured under the action's "Show More").
+   3. **Get Contents of URL**, with the `X-API-Key` header set (not visible in these screenshots — configured under the action's "Show More"). Shortcuts auto-numbers repeated actions of the same type ("Contents of URL 2", etc.) — make sure the later **Get Value**/**Speak** pair below points at this one, not the vibe-check call from step 3.
    4. **Get Value** for `summary` in the response.
    5. **Speak** the summary.
-   6. **Run "GIS"** — the shortcut calls itself, looping back to step 1 for another question. Location is re-fetched fresh on every loop (correct for "what's around me" while actually driving, not stale from the start of the conversation), and each turn is still an independent, stateless API call — the server has no memory of the conversation, only the shortcut is looping.
+   6. **Run "GIS"** — the shortcut calls itself, looping back to step 1 for another question. Location (and the vibe check) is re-fetched fresh on every loop (correct for "what's around me" while actually driving, not stale from the start of the conversation), and each turn is still an independent, stateless API call — the server has no memory of the conversation, only the shortcut is looping.
 
-Invocation: "Hey Siri, GIS" → Siri asks "What do you want to know?" → say anything the API understands (`"compare to the state"`, `"is this area at risk of flooding"`, `"help"`, or nothing in particular for the full summary) → it speaks the result, then asks again → keep asking follow-ups, or say "stop" (or "no"/"end"/"quit") to end the conversation.
+Invocation: "Hey Siri, GIS" → it speaks an unprompted vibe check of your current location, then asks "What do you want to know?" → say anything the API understands (`"compare to the state"`, `"is this area at risk of flooding"`, `"help"`, or nothing in particular for the full summary) → it speaks the result, then does the vibe check again and asks again → keep asking follow-ups, or say "stop" (or "no"/"end"/"quit") to end the conversation.
 
 ## Architecture
 
